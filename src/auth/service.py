@@ -254,6 +254,10 @@ def register(*, full_name: str, email: str, username: str, password: str,
                 "file there to find your verification link. You can also "
                 "sign in now; the account stays unverified until the link "
                 "is used.")
+    elif not delivery.delivered:
+        info = ("Account created. The verification email could not be sent. "
+                + delivery.note + " You can sign in now; the account stays "
+                "unverified until a verification link is used.")
     else:
         info = ("Account created. Check your inbox for the verification "
                 "link (it expires in "
@@ -592,6 +596,16 @@ def resend_verification(email: str) -> AuthResult:
                     generic + " Email delivery is not configured for real "
                     "sending: the message is in the development outbox "
                     "(results/mail_outbox/)."))
+            if delivery.mode == "off":
+                return AuthResult(True, info=(
+                    "If an unverified account exists for that address, a new "
+                    "verification link was requested. Email delivery is "
+                    "currently disabled, so in this deployment the message "
+                    "cannot actually be delivered until SMTP is configured."))
+            if not delivery.delivered:
+                return AuthResult(True, info=(
+                    "If an unverified account exists for that address, a new "
+                    "verification link was requested. " + delivery.note))
     return AuthResult(True, info=generic)
 
 

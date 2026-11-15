@@ -529,6 +529,47 @@ def test_resend_for_unknown_address_stays_generic():
     assert result.info.startswith("If an unverified account exists")
 
 
+_SMTP_FAILURE = mail.DeliveryResult(
+    "smtp", False,
+    "SMTP delivery failed (SMTPAuthenticationError); the message was not "
+    "sent. Check the server settings.")
+
+
+def test_register_reports_smtp_failure_instead_of_claiming_delivery(
+        monkeypatch):
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "smtp")
+    monkeypatch.setattr(mail, "send_verification",
+                        lambda *a, **k: _SMTP_FAILURE)
+    result = _register()
+    assert result.ok
+    assert "could not be sent" in result.info
+    assert "not sent" in result.info
+    assert "Check your inbox" not in result.info
+
+
+def test_resend_reports_smtp_failure_instead_of_claiming_delivery(
+        monkeypatch):
+    assert _register().ok
+    monkeypatch.setattr(auth_settings, "VERIFY_RESEND_COOLDOWN_SECONDS", 0)
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "smtp")
+    monkeypatch.setattr(mail, "send_verification",
+                        lambda *a, **k: _SMTP_FAILURE)
+    result = service.resend_verification("analyst@example.test")
+    assert result.ok
+    assert "not sent" in result.info
+    assert "has been sent" not in result.info
+
+
+def test_resend_labels_disabled_delivery_honestly(monkeypatch):
+    assert _register().ok
+    monkeypatch.setattr(auth_settings, "VERIFY_RESEND_COOLDOWN_SECONDS", 0)
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "off")
+    result = service.resend_verification("analyst@example.test")
+    assert result.ok
+    assert "disabled" in result.info
+    assert "has been sent" not in result.info
+
+
 # ---------------------------------------------------------- RBAC + admin
 def test_non_admins_cannot_reach_administrative_services():
     viewer = _register().user
