@@ -103,3 +103,22 @@ def test_invalid_postgres_configuration_is_rejected_without_connection(url, post
     with pytest.raises(db.AuthStorageError):
         db.PostgresAuthStore(url)
     connect.assert_not_called()
+
+
+@pytest.mark.parametrize("url", [
+    "psql 'postgresql://u:p@db.example.test/accounts'",
+    "'postgresql://u:p@db.example.test/accounts'",
+    "Connection string: postgresql://u:p@db.example.test/accounts",
+])
+def test_wrapped_url_rejected_with_actionable_message(url, postgres_connection):
+    _, connect = postgres_connection
+    with pytest.raises(db.AuthStorageError, match="must start with postgresql://"):
+        db.PostgresAuthStore(url)
+    connect.assert_not_called()
+
+
+def test_unparseable_url_rejected_with_actionable_message(postgres_connection):
+    _, connect = postgres_connection
+    with pytest.raises(db.AuthStorageError, match="could not be parsed"):
+        db.PostgresAuthStore("postgresql://u:pa%zzss@db.example.test/accounts")
+    connect.assert_not_called()

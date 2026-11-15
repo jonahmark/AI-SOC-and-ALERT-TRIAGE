@@ -183,25 +183,35 @@ class PostgresAuthStore:
 
         self._psycopg = psycopg
         self._dict_row = dict_row
+        # Stage validation so a misconfigured value yields actionable guidance
+        # without ever echoing the value itself (it contains credentials).
+        if not isinstance(database_url, str) or not database_url.startswith(
+                ("postgresql://", "postgres://")):
+            raise AuthStorageError(
+                "The database URL must start with postgresql:// - copy only the "
+                "URI itself, without psql commands, surrounding quotes, or labels.")
         try:
-            if not isinstance(database_url, str) or not database_url.startswith(
-                    ("postgresql://", "postgres://")):
-                raise ValueError
             options = conninfo_to_dict(database_url)
-            # Require an explicit network host: libpq ignores TLS on sockets.
-            hosts = options.get("host", "").split(",")
-            if any(not host or host.startswith(("/", "@")) for host in hosts):
-                raise ValueError
-            options["sslmode"] = "verify-full"
-            options["sslrootcert"] = options.get("sslrootcert") or certifi.where()
-            # GSS encryption otherwise takes precedence over libpq's TLS mode.
-            options["gssencmode"] = "disable"
-            options.setdefault("connect_timeout", "30")
+        except (psycopg.Error, ValueError, TypeError):
+            raise AuthStorageError(
+                "The database URL could not be parsed - check the configured "
+                "value for stray spaces, quotes, or line breaks.") from None
+        # Require an explicit network host: libpq ignores TLS on sockets.
+        hosts = options.get("host", "").split(",")
+        if any(not host or host.startswith(("/", "@")) for host in hosts):
+            raise AuthStorageError(
+                "The database URL must include a network host name.")
+        options["sslmode"] = "verify-full"
+        options["sslrootcert"] = options.get("sslrootcert") or certifi.where()
+        # GSS encryption otherwise takes precedence over libpq's TLS mode.
+        options["gssencmode"] = "disable"
+        options.setdefault("connect_timeout", "30")
+        try:
             self._conninfo = make_conninfo(**options)
         except (psycopg.Error, ValueError, TypeError, OSError):
             raise AuthStorageError(
-                "Private PostgreSQL authentication configuration is invalid."
-            ) from None
+                "The database URL could not be parsed - check the configured "
+                "value for stray spaces, quotes, or line breaks.") from None
 
         # CREATE IF NOT EXISTS alone is not safe against concurrent catalog
         # creation. Serialize all DDL across processes until this txn commits.
