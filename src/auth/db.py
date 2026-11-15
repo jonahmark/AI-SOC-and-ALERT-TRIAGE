@@ -95,6 +95,15 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     attempted_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_attempts_identifier ON login_attempts(identifier);
+CREATE INDEX IF NOT EXISTS idx_attempts_time ON login_attempts(attempted_at);
+
+CREATE TABLE IF NOT EXISTS email_sends (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    TEXT,                         -- account the message belongs to
+    purpose    TEXT NOT NULL,                -- verification | password_reset
+    created_at TEXT NOT NULL                 -- no addresses, links or tokens
+);
+CREATE INDEX IF NOT EXISTS idx_email_sends_time ON email_sends(created_at);
 
 CREATE TABLE IF NOT EXISTS audit_events (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,

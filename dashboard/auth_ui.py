@@ -385,15 +385,19 @@ def _login_page() -> None:
             st.rerun()
         for error in result.errors:
             st.error(error)
-    c1, c2 = st.columns(2)
+    c1, c2 = st.columns(2, vertical_alignment="bottom")
     with c1:
         if st.button("Forgot password?", key="auth_to_forgot", type="tertiary",
                      icon=":material/lock_open:", width="stretch"):
             _goto("forgot")
     with c2:
-        if st.button("Create an account", key="auth_to_signup", type="tertiary",
-                     icon=":material/person_add:", width="stretch"):
-            _goto("signup")
+        if auth_settings.ALLOW_REGISTRATION:
+            if st.button("Create an account", key="auth_to_signup",
+                         type="tertiary", icon=":material/person_add:",
+                         width="stretch"):
+                _goto("signup")
+        else:
+            st.caption("New accounts are created by an administrator.")
 
 
 def _mfa_login_step() -> None:
@@ -431,6 +435,22 @@ def _mfa_login_step() -> None:
 
 
 def _signup_page() -> None:
+    if not auth_settings.ALLOW_REGISTRATION:
+        # No form is rendered, so no residual credential stays in session state.
+        st.session_state.pop("su_password", None)
+        st.session_state.pop("su_confirm", None)
+        st.markdown('<div class="soc-auth-title">Registration is closed</div>'
+                    '<div class="soc-auth-sub">Accounts on this deployment are '
+                    'created by an administrator.</div>',
+                    unsafe_allow_html=True)
+        _notice()
+        ui.note("Ask an administrator to add you in User Management. Once the "
+                "account exists you can sign in here, then change the initial "
+                "password in your account panel.", "info", ui.ACCENT)
+        if st.button("Back to sign in", key="auth_to_login", type="tertiary",
+                     icon=":material/arrow_back:", width="stretch"):
+            _goto("login")
+        return
     st.markdown('<div class="soc-auth-title">Create your account</div>'
                 '<div class="soc-auth-sub">New accounts start with the '
                 'Researcher / Viewer role (least privilege). An administrator '

@@ -251,6 +251,13 @@ streamlit run app.py
   brevo, mailgun, postmark, ses or gmail) with one server-side sending
   credential — users never share it. If delivery is not configured the UI states
   the limitation honestly rather than faking a verification success.
+- **Public-deployment controls:** `AI_SOC_ALLOW_REGISTRATION=0` closes self-service
+  signup (administrators add people in **User Management → Add a user**, audited and
+  permission-checked); a deployment-wide email budget
+  (`AI_SOC_MAX_EMAILS_PER_HOUR`/`_PER_DAY`) protects the provider quota and sender
+  reputation; `AI_SOC_MAX_LOGIN_ATTEMPTS_PER_MINUTE` bounds unauthenticated
+  Argon2id work; retention pruning bounds database growth. Exhausted budgets and
+  delivery failures are reported as "not sent", never as success.
 
 Full architecture, configuration reference, CSRF/transport posture and
 limitations: **[docs/AUTHENTICATION.md](docs/AUTHENTICATION.md)**. Change the
@@ -394,11 +401,14 @@ storage), login (generic errors, lockout incl. unknown identifiers), sessions
 verification (single-use, expiry, honest mail-mode messages), RBAC/admin guards,
 audit (events recorded, no secrets), and the real Streamlit auth pages driven
 through `AppTest` (gate, signup, login, remember-me, reset via a real outbox link,
-viewer read-only triage, admin user management), plus the hardening features:
+viewer read-only triage, admin user management incl. provisioning a working account
+while signup is closed), plus the hardening features:
 password history, idle session timeout, TOTP two-factor enrol/login/disable
-(`tests/test_mfa.py`) and breach-password screening (`tests/test_breach.py`).
+(`tests/test_mfa.py`), breach-password screening (`tests/test_breach.py`) and the
+public-exposure controls (closed registration, email budgets, login-work cap,
+retention pruning).
 The auth fixtures redirect the database and mail outbox to a temporary folder.
-Current total: **358 passing tests**.
+Current total: **408 passing tests**.
 
 ## Sample demonstration workflow
 
@@ -458,10 +468,14 @@ Current total: **358 passing tests**.
 
 ## Security & reliability notes
 
-- **Deployment posture (LAN-only).** `AI_SOC_APP_URL` points at the server's LAN
-  address so email links open on other devices on the same network; the firewall
-  rule "AI-SOC Streamlit (LAN)" allows TCP 8501 only from the local subnet on
-  Private profiles. No public HTTP exposure — see
+- **Deployment posture (two deployments).** The local instance is LAN-only:
+  `AI_SOC_APP_URL` points at the server's LAN address so email links open on other
+  devices on the same network, and the firewall rule "AI-SOC Streamlit (LAN)" allows
+  TCP 8501 only from the local subnet on Private profiles — no public HTTP exposure.
+  The hosted instance runs on Streamlit Cloud over platform-terminated HTTPS with a
+  private PostgreSQL account store and the deployment-wide abuse caps above; its
+  public registration is closed by adding `AI_SOC_ALLOW_REGISTRATION=0` to the app's
+  Secrets — see
   [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) ("Deployment & reachability").
 
 - Uploads are extension- and size-validated (`config.ALLOWED_UPLOAD_EXTENSIONS`,

@@ -30,6 +30,8 @@ if st.secrets.load_if_toml_exists():
 
 import config
 from dashboard import auth_ui, common, components as ui, nav
+from src.auth import service
+from src.auth.db import AuthStorageError
 
 st.set_page_config(
     page_title="AI-SOC | Intelligent Security Operations",
@@ -51,6 +53,21 @@ ui.inject_css()
 # so this populates the shared cache every page reuses; if artefacts are
 # missing it records the errors and the pages show the missing-models notice.
 common.get_models()
+
+
+@st.cache_resource
+def _prune_auth_store() -> None:
+    """Once per server process: delete aged auth rows (failed logins, expired
+    tokens and sessions, old audit events) so anonymous traffic on a public
+    deployment cannot grow the database without bound. Maintenance must never
+    block sign-in; a storage failure surfaces through the auth pages instead."""
+    try:
+        service.prune_expired()
+    except AuthStorageError:
+        pass
+
+
+_prune_auth_store()
 
 # Authentication gate: renders login/signup/recovery and st.stop() when
 # there is no live session, so no dashboard element runs before sign-in.

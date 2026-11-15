@@ -6,17 +6,23 @@ Security properties:
   * opaque 256-bit session/recovery tokens, persisted only as SHA-256
     digests; recovery and verification tokens are single-use and expiring;
   * generic credential-failure messages (no account enumeration);
-  * per-identifier rate limiting with temporary lockout;
+  * per-identifier rate limiting with temporary lockout, plus a
+    deployment-wide cap on unauthenticated password-hashing work;
+  * registration can be closed so accounts are administrator-provisioned;
+  * a deployment-wide email budget protects the provider quota and sender
+    reputation; exhaustion is reported honestly, never sent anyway;
   * password changes bump an auth epoch, invalidating every old session;
   * password history blocks reuse of the last N passwords on change/reset;
   * sessions expire after an idle period as well as their absolute TTL;
   * optional TOTP second factor: Fernet-encrypted secrets, single-use
     short-lived login challenges, admin removal as the recovery path;
   * roles are assigned server-side; registration always yields `viewer`;
-  * audit events record important actions without secrets.
+  * audit events record important actions without secrets;
+  * retention pruning bounds growth from anonymous traffic.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -109,6 +115,23 @@ def _lockout_remaining(identifier: str) -> int:
     return max(0, int(remaining) + (1 if remaining % 1 else 0))
 
 
+def _login_work_exceeded() -> bool:
+    """Deployment-wide cap on password hashing per minute.
+
+    Lockout is per identifier, so rotating identifiers would otherwise buy
+    unlimited argon2id work (64 MiB each) on a public deployment. Counted from
+    recorded attempts; a refused attempt is not recorded, so the window drains
+    on its own and the refusal path stays cheap.
+    """
+    limit = auth_settings.MAX_LOGIN_ATTEMPTS_PER_MINUTE
+    if limit <= 0:
+        return False
+    row = get_store().query_one(
+        "SELECT COUNT(*) AS n FROM login_attempts WHERE attempted_at >= ?",
+        (_iso(_now() - timedelta(minutes=1)),))
+    return bool(row and row["n"] >= limit)
+
+
 def _create_session(user_row, remember: bool) -> str:
     token = security.new_token()
     ttl = (timedelta(days=auth_settings.REMEMBER_ME_DAYS) if remember
@@ -169,11 +192,84 @@ def _breach_screen(password: str, user_id: str | None = None) -> str | None:
     return None
 
 
+# ------------------------------------------------------- delivery budget
+def _email_budget_note() -> str | None:
+    """Honest reason when the deployment-wide SMTP budget is spent, else None."""
+    if auth_settings.EMAIL_MODE != "smtp":
+        return None
+    store = get_store()
+    for limit, window, label in (
+        (auth_settings.MAX_EMAILS_PER_HOUR, timedelta(hours=1), "hourly"),
+        (auth_settings.MAX_EMAILS_PER_DAY, timedelta(days=1), "daily"),
+    ):
+        if limit <= 0:
+            continue
+        row = store.query_one(
+            "SELECT COUNT(*) AS n FROM email_sends WHERE created_at >= ?",
+            (_iso(_now() - window),))
+        if row and row["n"] >= limit:
+            return (f"This deployment has reached its {label} email limit "
+                    f"({limit} messages), so the message was not sent. Try "
+                    "again later.")
+    return None
+
+
+def _send_email(user_id: str | None, purpose: str,
+                send: Callable[[], mail.DeliveryResult]) -> mail.DeliveryResult:
+    """Send within the deployment-wide budget, counting every real attempt.
+
+    Failed SMTP attempts are counted too: each one still contacts the provider,
+    so a broken configuration must not be retried without limit. Callers report
+    a non-delivered result honestly, as they do for any other delivery failure.
+    """
+    if auth_settings.EMAIL_MODE != "smtp":
+        return send()
+    note = _email_budget_note()
+    if note:
+        _audit("email_budget_exhausted", user_id=user_id, detail=purpose)
+        return mail.DeliveryResult("smtp", False, note)
+    get_store().execute(
+        "INSERT INTO email_sends (user_id, purpose, created_at) "
+        "VALUES (?, ?, ?)", (user_id, purpose, _iso(_now())))
+    return send()
+
+
+def _insert_account(*, full_name: str, email: str, username: str,
+                    organisation: str, password_hash: str, role: str) -> str:
+    """Create the account row (unverified, active) and its password history."""
+    user_id = security.new_user_id()
+    now = _iso(_now())
+    get_store().execute(
+        "INSERT INTO users (user_id, full_name, email, username, organisation, "
+        "password_hash, role, email_verified, account_status, auth_epoch, "
+        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', 1, ?, ?)",
+        (user_id, full_name, email, username, organisation, password_hash,
+         role, now, now))
+    _record_password_history(user_id, password_hash)
+    return user_id
+
+
+def _email_verification(user_id: str, email: str) -> mail.DeliveryResult:
+    """Issue a single-use verification token and send it within the budget."""
+    token = security.new_token()
+    get_store().execute(
+        "INSERT INTO verify_tokens (token_hash, user_id, created_at, expires_at) "
+        "VALUES (?, ?, ?, ?)",
+        (security.token_digest(token), user_id, _iso(_now()),
+         _iso(_now() + timedelta(hours=auth_settings.VERIFY_TOKEN_TTL_HOURS))))
+    return _send_email(user_id, "verification",
+                       lambda: mail.send_verification(email, token))
+
+
 # ------------------------------------------------------------- registration
 def register(*, full_name: str, email: str, username: str, password: str,
              confirm_password: str, organisation: str = "") -> AuthResult:
     """Create a least-privileged account. Any caller-supplied role is
     impossible by construction: this function accepts no role argument."""
+    if not auth_settings.ALLOW_REGISTRATION:
+        return AuthResult(False, errors=[
+            "Registration is closed on this deployment. Accounts are created "
+            "by an administrator - ask them to add you, then sign in."])
     errors: list[str] = []
     full_name = security.clean_text(full_name, 100)
     organisation = security.clean_text(organisation, 120)
@@ -219,26 +315,14 @@ def register(*, full_name: str, email: str, username: str, password: str,
     if breach_error:
         return AuthResult(False, errors=[breach_error])
 
-    user_id = security.new_user_id()
-    now = _iso(_now())
-    password_hash = security.hash_password(password)
-    store.execute(
-        "INSERT INTO users (user_id, full_name, email, username, organisation, "
-        "password_hash, role, email_verified, account_status, auth_epoch, "
-        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'active', 1, ?, ?)",
-        (user_id, full_name, email, username, organisation,
-         password_hash, rbac.DEFAULT_ROLE, now, now))
-    _record_password_history(user_id, password_hash)
+    user_id = _insert_account(
+        full_name=full_name, email=email, username=username,
+        organisation=organisation, password_hash=security.hash_password(password),
+        role=rbac.DEFAULT_ROLE)
     _audit("user_registered", user_id=user_id,
            detail=f"role={rbac.DEFAULT_ROLE}")
 
-    token = security.new_token()
-    store.execute(
-        "INSERT INTO verify_tokens (token_hash, user_id, created_at, expires_at) "
-        "VALUES (?, ?, ?, ?)",
-        (security.token_digest(token), user_id, now,
-         _iso(_now() + timedelta(hours=auth_settings.VERIFY_TOKEN_TTL_HOURS))))
-    delivery = mail.send_verification(email, token)
+    delivery = _email_verification(user_id, email)
     _audit("verification_requested", user_id=user_id,
            detail=f"mode={delivery.mode}")
 
@@ -278,6 +362,11 @@ def authenticate(identifier: str, password: str,
     if not identifier or not password:
         return AuthResult(False, errors=[
             "Enter your email/username and password."])
+
+    if _login_work_exceeded():
+        return AuthResult(False, errors=[
+            "Too many sign-in attempts on this deployment right now. Try "
+            "again in a minute."])
 
     locked = _lockout_remaining(identifier)
     if locked > 0:
@@ -399,6 +488,11 @@ def request_password_reset(email: str) -> AuthResult:
             "SELECT COUNT(*) AS n FROM reset_tokens WHERE user_id = ? "
             "AND created_at >= ?", (row["user_id"], window_start))
         if not recent or recent["n"] < auth_settings.RESET_REQUESTS_PER_WINDOW:
+            # Check the budget before rotating tokens: a spent budget must not
+            # invalidate a recovery link already in the user's inbox.
+            budget_note = _email_budget_note()
+            if budget_note:
+                return AuthResult(True, info=generic + " " + budget_note)
             store.execute(
                 "UPDATE reset_tokens SET used_at = ? WHERE user_id = ? "
                 "AND used_at IS NULL", (_iso(_now()), row["user_id"]))
@@ -409,7 +503,9 @@ def request_password_reset(email: str) -> AuthResult:
                 (security.token_digest(token), row["user_id"], _iso(_now()),
                  _iso(_now() + timedelta(
                      minutes=auth_settings.RESET_TOKEN_TTL_MINUTES))))
-            delivery = mail.send_password_reset(email, token)
+            delivery = _send_email(
+                row["user_id"], "password_reset",
+                lambda: mail.send_password_reset(email, token))
             _audit("password_reset_requested", user_id=row["user_id"],
                    detail=f"mode={delivery.mode}")
             if delivery.mode == "outbox":
@@ -578,6 +674,10 @@ def resend_verification(email: str) -> AuthResult:
                 latest["created_at"])).total_seconds()
             cooldown_ok = age >= auth_settings.VERIFY_RESEND_COOLDOWN_SECONDS
         if cooldown_ok:
+            # As with recovery: do not rotate the token if nothing can be sent.
+            budget_note = _email_budget_note()
+            if budget_note:
+                return AuthResult(True, info=generic + " " + budget_note)
             store.execute(
                 "UPDATE verify_tokens SET used_at = ? WHERE user_id = ? "
                 "AND used_at IS NULL", (_iso(_now()), user["user_id"]))
@@ -588,7 +688,9 @@ def resend_verification(email: str) -> AuthResult:
                 (security.token_digest(token), user["user_id"], _iso(_now()),
                  _iso(_now() + timedelta(
                      hours=auth_settings.VERIFY_TOKEN_TTL_HOURS))))
-            delivery = mail.send_verification(email, token)
+            delivery = _send_email(
+                user["user_id"], "verification",
+                lambda: mail.send_verification(email, token))
             _audit("verification_requested", user_id=user["user_id"],
                    detail=f"resend mode={delivery.mode}")
             if delivery.mode == "outbox":
@@ -921,3 +1023,106 @@ def provision_admin(*, full_name: str, email: str, username: str,
     return AuthResult(True, user=_public_user(row), info=(
         "Administrator account created (email marked verified because it "
         "was provisioned locally by the operator)."))
+
+
+def admin_create_user(actor: dict, *, full_name: str, email: str,
+                      username: str, password: str, confirm_password: str,
+                      role: str = rbac.DEFAULT_ROLE,
+                      organisation: str = "") -> AuthResult:
+    """Administrator-provisioned account, available even when public
+    registration is closed. The role is validated against the server-side
+    allow-list, the action is audited with the acting administrator, and the
+    public signup cap does not apply to an authenticated administrator."""
+    rbac.require(actor["role"], "manage_users")
+    if role not in rbac.ROLES:
+        return AuthResult(False, errors=["Choose a valid role."])
+    errors: list[str] = []
+    full_name = security.clean_text(full_name, 100)
+    organisation = security.clean_text(organisation, 120)
+    email = email.strip().lower()
+    username = username.strip().lower()
+    if not full_name:
+        errors.append("Enter the person's full name.")
+    if not security.valid_email(email):
+        errors.append("Enter a valid email address.")
+    if not security.valid_username(username):
+        errors.append("Username must be 3-32 characters: letters, numbers, "
+                      "dots, underscores or hyphens, starting with a letter "
+                      "or number.")
+    if not password:
+        errors.append("Enter an initial password.")
+    else:
+        errors.extend(security.password_policy_errors(password))
+    if password != confirm_password:
+        errors.append("The two passwords do not match.")
+    if errors:
+        return AuthResult(False, errors=errors)
+
+    store = get_store()
+    if store.query_one("SELECT user_id FROM users WHERE email = ?", (email,)):
+        return AuthResult(False, errors=[
+            "That email address already has an account."])
+    if store.query_one("SELECT user_id FROM users WHERE username = ?",
+                       (username,)):
+        return AuthResult(False, errors=["That username is already taken."])
+    breach_error = _breach_screen(password)
+    if breach_error:
+        return AuthResult(False, errors=[breach_error])
+
+    user_id = _insert_account(
+        full_name=full_name, email=email, username=username,
+        organisation=organisation, password_hash=security.hash_password(password),
+        role=role)
+    _audit("user_provisioned", user_id=user_id, actor_id=actor["user_id"],
+           detail=f"role={role}")
+    delivery = _email_verification(user_id, email)
+    _audit("verification_requested", user_id=user_id,
+           detail=f"provisioned mode={delivery.mode}")
+
+    info = f"Account created with the {rbac.ROLE_LABELS[role]} role. "
+    if delivery.mode == "outbox":
+        info += ("Email delivery is not configured for real sending: the "
+                 "verification message is in the development outbox "
+                 "(results/mail_outbox/).")
+    elif delivery.mode == "off":
+        info += ("Email delivery is disabled, so no verification message was "
+                 "sent and the account stays unverified.")
+    elif not delivery.delivered:
+        info += "The verification email could not be sent. " + delivery.note
+    else:
+        info += ("A verification link was emailed to that address. Share the "
+                 "initial password through a channel you trust, and ask them "
+                 "to change it in their account panel after signing in.")
+    row = store.query_one("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    return AuthResult(True, user=_public_user(row), info=info)
+
+
+# ------------------------------------------------------------- retention
+def prune_expired() -> dict[str, int]:
+    """Delete aged rows so anonymous traffic cannot grow the store without
+    bound. Returns rows removed per table; run once per server process."""
+    store = get_store()
+    now = _now()
+    attempt_cutoff = _iso(now - timedelta(
+        minutes=max(auth_settings.ATTEMPT_WINDOW_MINUTES, 60)))
+    token_cutoff = _iso(now - timedelta(days=auth_settings.TOKEN_RETENTION_DAYS))
+    audit_cutoff = _iso(now - timedelta(days=auth_settings.AUDIT_RETENTION_DAYS))
+    budget_cutoff = _iso(now - timedelta(days=1))
+    now_iso = _iso(now)
+    return {
+        "login_attempts": store.execute(
+            "DELETE FROM login_attempts WHERE attempted_at < ?",
+            (attempt_cutoff,)),
+        "reset_tokens": store.execute(
+            "DELETE FROM reset_tokens WHERE created_at < ?", (token_cutoff,)),
+        "verify_tokens": store.execute(
+            "DELETE FROM verify_tokens WHERE created_at < ?", (token_cutoff,)),
+        "email_sends": store.execute(
+            "DELETE FROM email_sends WHERE created_at < ?", (budget_cutoff,)),
+        "sessions": store.execute(
+            "DELETE FROM sessions WHERE expires_at < ?", (now_iso,)),
+        "totp_challenges": store.execute(
+            "DELETE FROM totp_challenges WHERE expires_at < ?", (now_iso,)),
+        "audit_events": store.execute(
+            "DELETE FROM audit_events WHERE created_at < ?", (audit_cutoff,)),
+    }

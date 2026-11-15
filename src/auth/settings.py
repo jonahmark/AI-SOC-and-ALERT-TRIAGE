@@ -67,6 +67,31 @@ ATTEMPT_WINDOW_MINUTES = 15
 LOCKOUT_MINUTES = 15
 MAX_REGISTRATIONS_PER_HOUR = 20
 
+# Public registration. Off means accounts are provisioned by an administrator
+# (User Management page or scripts/provision_admin.py); the signup page says so
+# instead of accepting details. Set AI_SOC_ALLOW_REGISTRATION=0 on a public
+# deployment so strangers cannot create accounts or trigger signup email.
+ALLOW_REGISTRATION = os.environ.get(
+    "AI_SOC_ALLOW_REGISTRATION", "1").strip().lower() not in ("", "0", "false", "off")
+
+# Deployment-wide budget for real SMTP sends (verification + recovery), shared
+# by every account and visitor. Protects the provider quota and the sender's
+# reputation; exhaustion is reported honestly and never sends anyway. 0 disables
+# a window. Development outbox/off modes are not budgeted because nothing leaves.
+MAX_EMAILS_PER_HOUR = _env_int("AI_SOC_MAX_EMAILS_PER_HOUR", 20)
+MAX_EMAILS_PER_DAY = _env_int("AI_SOC_MAX_EMAILS_PER_DAY", 60)
+
+# Password hashing is memory-hard (argon2id, 64 MiB per attempt), so an
+# unauthenticated login flood is a CPU/RAM denial of service on a small host.
+# This caps attempts per minute across the whole deployment, on top of the
+# per-identifier lockout. 0 disables it.
+MAX_LOGIN_ATTEMPTS_PER_MINUTE = _env_int("AI_SOC_MAX_LOGIN_ATTEMPTS_PER_MINUTE", 30)
+
+# Retention. Anonymous traffic writes rows (failed logins, tokens, audit
+# events); pruning bounds database growth. Run once per server process.
+AUDIT_RETENTION_DAYS = _env_int("AI_SOC_AUDIT_RETENTION_DAYS", 90)
+TOKEN_RETENTION_DAYS = _env_int("AI_SOC_TOKEN_RETENTION_DAYS", 7)
+
 # Password policy
 MIN_PASSWORD_LENGTH = 12
 MAX_PASSWORD_LENGTH = 256

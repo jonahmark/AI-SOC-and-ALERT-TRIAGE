@@ -570,6 +570,245 @@ def test_resend_labels_disabled_delivery_honestly(monkeypatch):
     assert "has been sent" not in result.info
 
 
+# ------------------------------------------------- public-exposure hardening
+def _smtp_success() -> mail.DeliveryResult:
+    return mail.DeliveryResult("smtp", True, "Email sent via SMTP.")
+
+
+def test_closed_registration_creates_nothing_and_sends_nothing(monkeypatch):
+    monkeypatch.setattr(auth_settings, "ALLOW_REGISTRATION", False)
+    sent: list[tuple] = []
+
+    def _record(*args, **kwargs):
+        sent.append(args)
+        return _smtp_success()
+
+    monkeypatch.setattr(mail, "send_verification", _record)
+    result = _register()
+    assert not result.ok
+    assert any("administrator" in e.lower() for e in result.errors)
+    assert db.get_store().query("SELECT * FROM users") == []
+    assert db.get_store().query("SELECT * FROM verify_tokens") == []
+    assert sent == []
+
+
+def test_admin_provisions_a_working_account_while_registration_is_closed(
+        monkeypatch, admin_user):
+    monkeypatch.setattr(auth_settings, "ALLOW_REGISTRATION", False)
+    result = service.admin_create_user(
+        admin_user, full_name="Invited Analyst", email="invited@example.test",
+        username="invited", password=TEST_PASSWORD,
+        confirm_password=TEST_PASSWORD, role="analyst")
+    assert result.ok, result.errors
+    assert result.user["role"] == "analyst"
+    assert result.user["email_verified"] is False
+    row = db.get_store().query_one(
+        "SELECT * FROM users WHERE user_id = ?", (result.user["user_id"],))
+    assert row["password_hash"].startswith("$argon2id$")
+    assert security.verify_password(row["password_hash"], TEST_PASSWORD)
+    assert latest_mail_link_token()
+    assert service.authenticate("invited", TEST_PASSWORD).ok
+    event = db.get_store().query_one(
+        "SELECT * FROM audit_events WHERE event = 'user_provisioned'")
+    assert event["actor_id"] == admin_user["user_id"]
+    assert TEST_PASSWORD not in event["detail"]
+
+
+def test_non_admins_cannot_provision_users():
+    viewer = _register().user
+    for actor in ({"role": "viewer"}, {"role": "analyst"}, viewer):
+        with pytest.raises(rbac.PermissionDenied):
+            service.admin_create_user(
+                actor, full_name="Escalation", email="esc@example.test",
+                username="escalator", password=TEST_PASSWORD,
+                confirm_password=TEST_PASSWORD, role="administrator")
+    assert db.get_store().query(
+        "SELECT * FROM users WHERE email = 'esc@example.test'") == []
+
+
+def test_provisioned_role_must_be_on_the_allow_list(admin_user):
+    result = service.admin_create_user(
+        admin_user, full_name="Bad Role", email="badrole@example.test",
+        username="badrole", password=TEST_PASSWORD,
+        confirm_password=TEST_PASSWORD, role="superuser")
+    assert not result.ok
+    assert db.get_store().query(
+        "SELECT * FROM users WHERE email = 'badrole@example.test'") == []
+
+
+def test_public_signup_cap_does_not_block_admin_provisioning(
+        monkeypatch, admin_user):
+    monkeypatch.setattr(auth_settings, "MAX_REGISTRATIONS_PER_HOUR", 0)
+    assert not _register().ok
+    result = service.admin_create_user(
+        admin_user, full_name="Invited Viewer", email="invited2@example.test",
+        username="invited2", password=TEST_PASSWORD,
+        confirm_password=TEST_PASSWORD)
+    assert result.ok, result.errors
+    assert result.user["role"] == "viewer"
+
+
+def test_hourly_email_budget_stops_sending_and_says_so(monkeypatch):
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "smtp")
+    monkeypatch.setattr(auth_settings, "MAX_EMAILS_PER_HOUR", 1)
+    calls: list[tuple] = []
+
+    def _send(*args, **kwargs):
+        calls.append(args)
+        return _smtp_success()
+
+    monkeypatch.setattr(mail, "send_verification", _send)
+    assert _register().ok
+    second = _register(email="second@example.test", username="second")
+    assert second.ok
+    assert "hourly email limit" in second.info
+    assert "not sent" in second.info
+    assert "Check your inbox" not in second.info
+    assert len(calls) == 1
+    assert db.get_store().query_one(
+        "SELECT COUNT(*) AS n FROM email_sends")["n"] == 1
+
+
+def test_daily_email_budget_stops_recovery_emails(monkeypatch):
+    assert _register().ok
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "smtp")
+    monkeypatch.setattr(auth_settings, "MAX_EMAILS_PER_DAY", 1)
+    calls: list[tuple] = []
+
+    def _send(*args, **kwargs):
+        calls.append(args)
+        return _smtp_success()
+
+    monkeypatch.setattr(mail, "send_password_reset", _send)
+    first = service.request_password_reset("analyst@example.test")
+    assert first.ok
+    assert "not sent" not in first.info
+    second = service.request_password_reset("analyst@example.test")
+    assert second.ok
+    assert "daily email limit" in second.info
+    assert "not sent" in second.info
+    assert len(calls) == 1
+
+
+def test_spent_budget_keeps_the_recovery_link_already_issued(monkeypatch):
+    assert _register().ok
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "smtp")
+    monkeypatch.setattr(auth_settings, "MAX_EMAILS_PER_DAY", 1)
+    issued: list[str] = []
+
+    def _send(email, token):
+        issued.append(token)
+        return _smtp_success()
+
+    monkeypatch.setattr(mail, "send_password_reset", _send)
+    assert service.request_password_reset("analyst@example.test").ok
+    again = service.request_password_reset("analyst@example.test")
+    assert "daily email limit" in again.info
+    assert len(issued) == 1
+    new_password = "Rotated!Pass-99"
+    assert service.reset_password(issued[0], new_password, new_password).ok
+
+
+def test_spent_budget_keeps_the_verification_link_already_issued(monkeypatch):
+    monkeypatch.setattr(auth_settings, "EMAIL_MODE", "smtp")
+    monkeypatch.setattr(auth_settings, "MAX_EMAILS_PER_DAY", 1)
+    issued: list[str] = []
+
+    def _send(email, token):
+        issued.append(token)
+        return _smtp_success()
+
+    monkeypatch.setattr(mail, "send_verification", _send)
+    assert _register().ok
+    monkeypatch.setattr(auth_settings, "VERIFY_RESEND_COOLDOWN_SECONDS", 0)
+    again = service.resend_verification("analyst@example.test")
+    assert "daily email limit" in again.info
+    assert len(issued) == 1
+    assert service.verify_email(issued[0]).ok
+
+
+def test_development_outbox_is_not_budgeted(monkeypatch):
+    monkeypatch.setattr(auth_settings, "MAX_EMAILS_PER_HOUR", 1)
+    monkeypatch.setattr(auth_settings, "MAX_EMAILS_PER_DAY", 1)
+    assert _register().ok
+    second = _register(email="second@example.test", username="second")
+    assert second.ok
+    assert "limit" not in second.info
+    assert len(list(auth_settings.MAIL_OUTBOX_DIR.glob("*.eml"))) == 2
+    assert db.get_store().query("SELECT * FROM email_sends") == []
+
+
+def test_login_work_cap_refuses_before_hashing(monkeypatch):
+    monkeypatch.setattr(auth_settings, "MAX_LOGIN_ATTEMPTS_PER_MINUTE", 2)
+    hashed: list[str] = []
+    real_verify = security.verify_password
+
+    def _counting_verify(password_hash, password):
+        hashed.append(password)
+        return real_verify(password_hash, password)
+
+    monkeypatch.setattr(security, "verify_password", _counting_verify)
+    for _ in range(2):
+        assert not service.authenticate(
+            "nobody@example.test", "wrong-password").ok
+    third = service.authenticate("nobody@example.test", "wrong-password")
+    assert not third.ok
+    assert any("too many sign-in attempts" in e.lower() for e in third.errors)
+    assert len(hashed) == 2  # the refusal cost no argon2id work
+
+
+def test_zero_login_cap_disables_the_deployment_wide_check(monkeypatch):
+    monkeypatch.setattr(auth_settings, "MAX_LOGIN_ATTEMPTS_PER_MINUTE", 0)
+    for _ in range(4):
+        result = service.authenticate("nobody@example.test", "wrong-password")
+        assert not result.ok
+        assert "too many sign-in attempts" not in " ".join(result.errors).lower()
+
+
+def test_prune_removes_aged_rows_and_keeps_recent_ones():
+    assert _register().ok
+    store = db.get_store()
+    aged = (datetime.now(timezone.utc) - timedelta(days=120)).isoformat(
+        timespec="seconds")
+    store.execute(
+        "INSERT INTO login_attempts (identifier, success, attempted_at) "
+        "VALUES (?, 0, ?)", ("aged@example.test", aged))
+    store.execute(
+        "INSERT INTO audit_events (event, user_id, actor_id, detail, created_at) "
+        "VALUES ('aged_event', NULL, NULL, '', ?)", (aged,))
+    store.execute(
+        "INSERT INTO email_sends (user_id, purpose, created_at) "
+        "VALUES (NULL, 'verification', ?)", (aged,))
+    users_before = store.query("SELECT * FROM users")
+    removed = service.prune_expired()
+    assert removed["login_attempts"] >= 1
+    assert removed["audit_events"] >= 1
+    assert removed["email_sends"] >= 1
+    assert store.query(
+        "SELECT * FROM login_attempts WHERE identifier = 'aged@example.test'"
+    ) == []
+    assert store.query(
+        "SELECT * FROM audit_events WHERE event = 'aged_event'") == []
+    assert store.query("SELECT * FROM users") == users_before
+    assert store.query(
+        "SELECT * FROM audit_events WHERE event = 'user_registered'")
+
+
+def test_prune_removes_expired_sessions_and_keeps_live_ones():
+    user = _register().user
+    first = service.authenticate(user["username"], TEST_PASSWORD)
+    second = service.authenticate(user["username"], TEST_PASSWORD)
+    assert first.ok and second.ok
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(
+        timespec="seconds")
+    db.get_store().execute(
+        "UPDATE sessions SET expires_at = ? WHERE session_id = ?",
+        (past, security.token_digest(first.token)))
+    assert service.prune_expired()["sessions"] == 1
+    assert service.validate_session(first.token) is None
+    assert service.validate_session(second.token) is not None
+
+
 # ---------------------------------------------------------- RBAC + admin
 def test_non_admins_cannot_reach_administrative_services():
     viewer = _register().user

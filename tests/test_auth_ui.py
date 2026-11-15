@@ -17,6 +17,7 @@ from streamlit.testing.v1 import AppTest
 
 import config
 from src.auth import db, security, service
+from src.auth import settings as auth_settings
 from tests.conftest import TEST_PASSWORD, latest_mail_link_token
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -154,6 +155,24 @@ def test_signup_rejects_mismatched_confirmation():
     _widget(at.text_input, "su_confirm").set_value("Different-1!Password")
     at = _widget(at.button, "su_submit").click().run()
     assert any("do not match" in e.value for e in at.error)
+    assert db.get_store().query("SELECT * FROM users") == []
+
+
+def test_closed_registration_renders_an_honest_notice_and_no_form(monkeypatch):
+    monkeypatch.setattr(auth_settings, "ALLOW_REGISTRATION", False)
+    at = _app()
+    at.query_params["auth"] = "signup"
+    at = at.run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert "su_password" not in [t.key for t in at.text_input]
+    assert not any(b.key == "su_submit" for b in at.button)
+    rendered = " ".join(str(m.value) for m in at.markdown)
+    assert "Registration is closed" in rendered
+    assert "administrator" in rendered.lower()
+    at = _widget(at.button, "auth_to_login").click().run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert not any(b.key == "auth_to_signup" for b in at.button)
+    assert any("administrator" in str(c.value).lower() for c in at.caption)
     assert db.get_store().query("SELECT * FROM users") == []
 
 
@@ -319,6 +338,33 @@ def test_admin_can_open_user_management(admin_token):
     rendered = " ".join(str(m.value) for m in at.markdown)
     assert "Access restricted" not in rendered
     assert any(t.key == "um_pick" for t in at.selectbox)
+
+
+@requires_artefacts
+def test_admin_provisions_a_user_from_user_management(admin_token, monkeypatch):
+    monkeypatch.setattr(auth_settings, "ALLOW_REGISTRATION", False)
+    at = _page_app("user_management", admin_token).run()
+    assert not at.exception, [e.message for e in at.exception]
+    rendered = " ".join(str(m.value) for m in at.markdown)
+    assert "Public registration is" in rendered
+    _widget(at.text_input, "nu_full_name").set_value("Invited Analyst")
+    _widget(at.text_input, "nu_username").set_value("invited")
+    _widget(at.text_input, "nu_email").set_value("invited@example.test")
+    _widget(at.selectbox, "nu_role").select("analyst")
+    _widget(at.text_input, "nu_password").set_value(TEST_PASSWORD)
+    _widget(at.text_input, "nu_confirm").set_value(TEST_PASSWORD)
+    at = _widget(at.button,
+                 "FormSubmitter:um_add_user_form-Create account").click().run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+    assert any("Account created" in s.value for s in at.success)
+    row = db.get_store().query_one(
+        "SELECT * FROM users WHERE username = 'invited'")
+    assert row is not None
+    assert row["role"] == "analyst"
+    assert row["email_verified"] == 0
+    assert service.authenticate("invited", TEST_PASSWORD).ok
+    assert not at.session_state.get("nu_password")
 
 
 @requires_artefacts

@@ -22,7 +22,7 @@ secret is ever written to the activity log, the audit log, or the UI.
 - [Password recovery](#password-recovery)
 - [Email verification](#email-verification)
 - [Email delivery modes](#email-delivery-modes)
-- [Brute-force protection](#brute-force-protection)
+- [Brute-force and abuse protection](#brute-force-and-abuse-protection)
 - [Auditing](#auditing)
 - [CSRF, cookies and transport](#csrf-cookies-and-transport)
 - [Configuration reference](#configuration-reference)
@@ -49,6 +49,11 @@ streamlit run app.py
 No administrator credential is hardcoded, echoed, logged, or stored in any
 template. Registration through the web UI always creates a least-privileged
 **viewer**; only an administrator can grant more.
+
+On a public deployment set `AI_SOC_ALLOW_REGISTRATION=0`. The signup page then
+states that registration is closed, and administrators add people in
+**User Management → Add a user** (any role, permission-checked and audited,
+with a verification link emailed inside the deployment's sending budget).
 
 On first sign-in, change the provisioned password from the account panel
 (Password change). Changing a password invalidates every other session.
@@ -259,9 +264,9 @@ Links use `AI_SOC_APP_URL` as their public base. In `outbox` mode the `.eml`
 files contain live single-use tokens — treat that directory as sensitive and
 clear it after testing.
 
-### Deployment & reachability (LAN-only posture)
+### Deployment & reachability (two deployments)
 
-As of 2026-11-09 this prototype is deployed **LAN-only**:
+**Local instance — LAN-only, plain HTTP (since 2026-11-09):**
 
 - `AI_SOC_APP_URL` is set to the server's LAN address
   (`http://192.168.3.47:8501`), so verification/recovery links open on any
@@ -272,12 +277,30 @@ As of 2026-11-09 this prototype is deployed **LAN-only**:
   **Private profiles only, from the local subnet**, and the home Wi-Fi is
   categorised Private. `scripts/allow_lan_access.ps1` (run as administrator,
   idempotent) applies both settings and logs to `results/allow_lan_access.log`.
+  The dashboard itself runs in WSL and is reached through a Windows portproxy.
 - If the machine's LAN IP changes (DHCP), update `AI_SOC_APP_URL` and restart
   the dashboard; old links keep the previous base URL.
-- **No internet exposure.** Public access (HTTPS reverse proxy or tunnel) is
-  deliberately deferred to the security-hardening phase; plain HTTP must not
-  be exposed publicly because session cookies and credentials would travel
-  unencrypted.
+- **No internet exposure for this instance.** Plain HTTP must not be exposed
+  publicly because session cookies and credentials would travel unencrypted.
+
+**Hosted instance — public HTTPS on Streamlit Cloud (since 2026-11-15):**
+
+- `AI_SOC_APP_URL` is the public app URL, so emailed links open from any
+  device; the platform terminates TLS, so `Secure` cookies apply.
+- Accounts, sessions, tokens and audit events live in a private PostgreSQL
+  database (`AI_SOC_AUTH_DATABASE_URL`, set in the platform's owner-only
+  Secrets manager). The local instance keeps its own SQLite store unless the
+  same URL is configured there too.
+- Registration policy: set `AI_SOC_ALLOW_REGISTRATION=0` in the app's Secrets
+  so accounts are administrator-provisioned and strangers cannot create
+  accounts or trigger signup email. This is the chosen policy for the hosted
+  instance; it takes effect only once the operator adds that secret (the
+  default is open signup).
+- The email budget and login-work cap matter most here: the URL is public and
+  the container has a 1 GB RAM ceiling, so unbounded argon2id work or provider
+  quota burn is a real denial-of-service risk.
+- The container disk is ephemeral — triage state and analysis caches reset on
+  redeploy. Authentication state survives because it is in PostgreSQL.
 
 ### Private PostgreSQL storage (optional, for cloud deployments)
 
@@ -384,7 +407,9 @@ Notes:
 - Verify delivery with `python scripts/send_test_email.py recipient@example.com`;
   `Delivered: True` confirms the same path verification/recovery emails use.
 
-## Brute-force protection
+## Brute-force and abuse protection
+
+Per-identifier controls:
 
 - A sliding window (`ATTEMPT_WINDOW_MINUTES`, default 15) counts consecutive
   failures per identifier; `MAX_FAILED_ATTEMPTS` (default 5) triggers a
@@ -392,7 +417,58 @@ Notes:
 - The same lockout applies to **unknown** identifiers, so the response cannot
   be used to enumerate accounts. Login failures always return an identical
   generic message; disabled accounts are indistinguishable from bad passwords.
-- Registration is capped at `MAX_REGISTRATIONS_PER_HOUR` (default 20).
+
+Deployment-wide controls (added 2026-11-15, when the app became publicly
+reachable on Streamlit Cloud):
+
+- **Registration policy.** `AI_SOC_ALLOW_REGISTRATION=0` closes public signup:
+  the signup page renders an honest "registration is closed" notice instead of
+  a form, and `service.register()` refuses before any validation, hashing,
+  database write or email. Administrators add people in **User Management →
+  Add a user** (`service.admin_create_user`: `manage_users` permission, role
+  validated against the server-side allow-list, audited with the acting
+  administrator, account starts unverified and a verification link is emailed
+  within the budget). `scripts/provision_admin.py` still creates the first
+  administrator, and the public signup cap does not apply to admin
+  provisioning.
+- **Signup cap.** Public registration is capped at
+  `MAX_REGISTRATIONS_PER_HOUR` (default 20, counted deployment-wide). Tradeoff:
+  while the cap is hit, legitimate self-service signup is refused too — one
+  more reason to close registration on a public URL.
+- **Email budget.** Real SMTP sends (verification + recovery) are capped
+  deployment-wide at `AI_SOC_MAX_EMAILS_PER_HOUR` (20) and
+  `AI_SOC_MAX_EMAILS_PER_DAY` (60); keep the daily cap below your provider's
+  plan limit. Every real attempt is recorded in `email_sends` (account id,
+  purpose, timestamp — never an address, link or token), including failures,
+  because each one still contacts the provider. When the budget is spent the
+  message is **not** sent and the UI says so honestly. Recovery and resend
+  check the budget *before* rotating tokens, so a spent budget never
+  invalidates a link already in someone's inbox. `outbox`/`off` modes are not
+  budgeted because nothing leaves the machine.
+- **Login work cap.** `AI_SOC_MAX_LOGIN_ATTEMPTS_PER_MINUTE` (default 30, 0
+  disables) refuses sign-in before any argon2id work once the deployment-wide
+  per-minute count is reached. Without it, rotating identifiers would buy
+  unlimited memory-hard hashing (64 MiB per attempt) on a small host. Refusals
+  are not recorded, so the window drains on its own and the refusal path stays
+  cheap.
+- **Retention.** `service.prune_expired()` runs once per server process
+  (`app.py`, `st.cache_resource`) and deletes aged `login_attempts`, expired
+  `sessions` and `totp_challenges`, `reset_tokens`/`verify_tokens` older than
+  `AI_SOC_TOKEN_RETENTION_DAYS` (7), `email_sends` older than a day, and
+  `audit_events` older than `AI_SOC_AUDIT_RETENTION_DAYS` (90). A storage
+  failure while pruning never blocks sign-in.
+
+**Why not per-IP limits?** Streamlit 1.67 exposes `st.context.ip_address` as
+the raw TCP peer (the package does not parse `X-Forwarded-For`), so behind
+Streamlit Cloud's proxy it is the proxy address or `None` — it would throttle
+all visitors as one bucket. Reading `x-forwarded-for` from `st.context.headers`
+is client-spoofable unless the proxy overwrites it. The controls above
+therefore do not depend on a trustworthy client IP.
+
+**Known tradeoff:** lockout is per identifier, so someone who knows an address
+can still lock that account out for 15 minutes with 5 wrong guesses. The
+login-work cap bounds how fast that can be done deployment-wide but does not
+eliminate it.
 
 ## Auditing
 
@@ -402,7 +478,9 @@ registration, login success/failure/lockout, logout, password reset
 requested/completed, password change, password-reuse blocks, idle session
 expiry, TOTP enrolment/challenges/disable (see above), breach screening
 blocks and fail-open outages, email verification, role change, account
-status change, session revocation, and admin provisioning.
+status change, session revocation, admin provisioning (`user_provisioned`,
+attributed to the acting administrator) and exhausted email budget
+(`email_budget_exhausted`).
 
 The audit detail **never** contains a password or a token. Failed-login detail
 records only a category (`unknown_account`, `account_disabled`, `bad_password`)
@@ -444,6 +522,12 @@ real secrets). Real environment variables override `.env`.
 | `AI_SOC_RESET_TOKEN_TTL_MINUTES` | 30 | Recovery token lifetime |
 | `AI_SOC_VERIFY_TOKEN_TTL_HOURS` | 24 | Verification token lifetime |
 | `AI_SOC_MAX_FAILED_ATTEMPTS` | 5 | Failures before lockout |
+| `AI_SOC_MAX_LOGIN_ATTEMPTS_PER_MINUTE` | 30 | Deployment-wide sign-in cap before argon2id work (0 disables) |
+| `AI_SOC_ALLOW_REGISTRATION` | 1 | 0 closes public signup; accounts are administrator-provisioned |
+| `AI_SOC_MAX_EMAILS_PER_HOUR` | 20 | Deployment-wide real-SMTP sends per hour (0 disables) |
+| `AI_SOC_MAX_EMAILS_PER_DAY` | 60 | Deployment-wide real-SMTP sends per day (0 disables) |
+| `AI_SOC_AUDIT_RETENTION_DAYS` | 90 | Audit events kept before pruning |
+| `AI_SOC_TOKEN_RETENTION_DAYS` | 7 | Recovery/verification token rows kept before pruning |
 | `AI_SOC_EMAIL_MODE` | outbox | `off` / `outbox` / `smtp` |
 | `AI_SOC_EMAIL_PROVIDER` | — | Preset: `sendgrid` / `brevo` / `mailgun` / `postmark` / `ses` / `gmail` (auto-fills host/port) |
 | `AI_SOC_APP_URL` | http://localhost:8501 | Public base for links |
@@ -468,6 +552,13 @@ pytest tests/ -v
   expiry, lockout clearing, weak/mismatch non-consumption, window cap),
   verification (single-use, expiry, resend cooldown), RBAC/admin guards,
   audit (events recorded, no secrets, attribution) and the security primitives.
+  Public-exposure hardening is covered too: closed registration creates nothing
+  and sends nothing, admin provisioning works while signup is closed (and is
+  refused for non-admins / off-list roles), the hourly and daily email budgets
+  stop sending and report honestly, a spent budget keeps an already-issued
+  recovery/verification link usable, the development outbox is not budgeted,
+  the login-work cap refuses before hashing, and retention pruning removes aged
+  rows and expired sessions while keeping live ones.
 - `tests/test_mfa.py` covers the TOTP layer: encrypted secret storage,
   enrolment confirmation, two-stage login, challenge expiry/single-use/
   attempt caps, lockout integration, self-disable and admin recovery, and
@@ -479,31 +570,34 @@ pytest tests/ -v
   the authentication gate, page links, signup, valid/invalid login,
   remember-me cookie state, expired-session notice, logout, recovery via a
   real outbox link, single-use verification, viewer refusal of admin pages,
-  viewer read-only triage, admin user management, password-change session
-  re-issuance, the MFA code step at login, account-panel TOTP enrol/disable
-  and admin 2FA removal.
+  viewer read-only triage, admin user management (including provisioning a
+  working account through the Add a user form while public registration is
+  closed), the closed-signup notice and removed signup form, password-change
+  session re-issuance, the MFA code step at login, account-panel TOTP
+  enrol/disable and admin 2FA removal.
 
 The auth fixtures redirect the database and mail outbox to a temporary folder,
 so the suite never touches your real accounts or analyst state. Full suite:
-**358 passing tests**.
+**408 passing tests**.
 
 ## Security posture and deferred items
 
 Decisions recorded 2026-11-09 (security-hardening phase), with the reasoning
 so a future operator can revisit them:
 
-- **Exposure: LAN-only, plain HTTP.** The dashboard is reachable only from
-  the local subnet (Private-profile firewall rule). Public exposure is
-  deliberately deferred: it requires a TLS-terminating reverse proxy (or a
-  tunnel) first, because session cookies and token-bearing email links must
-  not travel unencrypted over the internet. Nothing in the app terminates
-  TLS itself.
-- **Secrets: `.env` + environment, not a secrets manager.** For a
-  single-node research prototype this is proportionate: the SMTP key and
-  the TOTP encryption key live in a gitignored `.env` with operator-only
-  access. A vault/KMS integration would add operational weight without
-  changing the threat model here; revisit before any multi-user production
-  deployment.
+- **Exposure: local instance LAN-only over plain HTTP; cloud instance public
+  over HTTPS.** The WSL dashboard is reachable only from the local subnet
+  (Private-profile firewall rule plus a Windows portproxy to the WSL port).
+  The Streamlit Cloud deployment is public and TLS-terminated by the platform,
+  so session cookies and token-bearing email links are encrypted there.
+  Nothing in the app terminates TLS itself — never expose the local instance
+  to the internet without a TLS-terminating reverse proxy.
+- **Secrets: `.env` locally, platform Secrets manager on cloud.** For a
+  single-node research prototype this is proportionate: the SMTP key and the
+  TOTP encryption key live in a gitignored `.env` with operator-only access,
+  and on Streamlit Cloud in the app's owner-only Secrets manager (never in
+  Git). A vault/KMS integration would add operational weight without changing
+  the threat model here; revisit before any multi-user production deployment.
 - **MFA is optional per account, not policy-enforced.** Administrators are
   encouraged to enrol (the account panel says so); forcing it would need a
   grace-period and recovery workflow beyond this prototype's scope.
@@ -513,18 +607,49 @@ so a future operator can revisit them:
   no pre-hardening history; their current password is still protected
   against immediate reuse.
 
+Decisions recorded 2026-11-15 (public-exposure hardening), after an audit of
+what an anonymous visitor can do on the public cloud URL:
+
+- **Cloud registration is administrator-provisioned.** Open signup let anyone
+  create accounts, consume the SendGrid quota with verification mail to
+  arbitrary addresses (a sender-reputation risk as well as a quota risk), and
+  fill the database with junk. The chosen policy is `AI_SOC_ALLOW_REGISTRATION=0`
+  in the cloud Secrets (operator-added; not yet applied at the time of writing),
+  while the local instance keeps open signup for convenience. The operator chose
+  this over invite codes and over leaving signup open.
+- **Caps that do not depend on client IP.** Per-IP limiting is not trustworthy
+  here (see the abuse-protection section), so the budget, login-work cap and
+  registration policy are deployment-wide and account-scoped instead.
+- **Email failures stay visible.** A spent budget, a disabled provider or an
+  SMTP error is reported in the UI as "not sent"; no path claims delivery that
+  did not happen.
+- **Retention is bounded, audit is not silent.** Pruning removes aged
+  anonymous-traffic rows; audit events survive 90 days by default so an
+  operator can still review abuse after the fact.
+
 ## Limitations
 
 - **Research prototype, not a production IdP.** No SSO/OAuth or
   account-lockout notification email. TOTP MFA is optional per account,
   not enforced by policy.
-- **SQLite** is single-node; there is no horizontal scaling or distributed
-  rate-limit store.
+- **Storage is single-node by default.** SQLite is the default; the optional
+  private PostgreSQL URI (used by the cloud deployment) lets instances share
+  accounts, but the app itself does not scale horizontally and rate limits are
+  enforced in the database rather than a distributed cache.
+- **No trustworthy client IP behind the platform proxy.** Abuse controls are
+  deployment-wide and per-account, not per-IP, so a determined visitor can
+  still consume a share of the email budget within the caps.
+- **Per-identifier lockout can be used to annoy a known account.** Five wrong
+  guesses lock that identifier for 15 minutes; the login-work cap bounds the
+  rate but does not prevent it.
 - **Outbox mode is not delivery.** It exists so the prototype is demonstrable
   offline; it must not be used to claim real verification in production.
-- **HTTPS is the operator's responsibility.** The app does not terminate TLS;
-  put it behind a reverse proxy that does before any non-local use.
-- **No secrets manager integration.** SMTP credentials live in `.env`/env vars;
-  protect that file and never commit it.
+- **HTTPS is the operator's responsibility for self-hosting.** The app does not
+  terminate TLS; put it behind a reverse proxy that does before any non-local
+  use (Streamlit Cloud already terminates TLS for the hosted deployment).
+- **No vault/KMS integration.** Locally, SMTP credentials live in `.env`/env
+  vars — protect that file and never commit it. On Streamlit Cloud they live in
+  the platform's owner-only Secrets manager, which is not a general-purpose
+  secrets management system.
 - Session and token lifetimes are configurable defaults, not a compliance
   guarantee. Review them against your own policy before deployment.

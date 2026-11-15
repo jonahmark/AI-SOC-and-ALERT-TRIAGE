@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 
 from src.auth import rbac, service
+from src.auth import settings as auth_settings
 from dashboard import auth_ui
 from dashboard import components as ui
 
@@ -64,10 +65,76 @@ def render() -> None:
 
     # ------------------------------------------------------------------ users
     with tab_users:
+        if "um_notice" in st.session_state:
+            text, kind = st.session_state.pop("um_notice")
+            if kind == "success":
+                st.success(text)
+            else:
+                st.error(text)
         with ui.card("Accounts", "user",
-                     "New registrations always start as Researcher / Viewer",
+                     "Public signups start as Researcher / Viewer; "
+                     "administrators can provision any role",
                      key="um_accounts"):
             ui.show_table(_users_frame(users), height=320, key="um_users_table")
+
+        with ui.card("Add a user", "person_add",
+                     "Administrator-provisioned account; available even when "
+                     "public registration is closed", key="um_add_user"):
+            with st.form("um_add_user_form", border=False):
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.text_input("Full name", key="nu_full_name",
+                                  placeholder="Ada Lovelace")
+                with c2:
+                    st.text_input("Username", key="nu_username",
+                                  placeholder="ada",
+                                  help="3-32 characters: letters, numbers, "
+                                       "dots, underscores or hyphens.")
+                c3, c4 = st.columns(2)
+                with c3:
+                    st.text_input("Email address", key="nu_email",
+                                  placeholder="name@example.com")
+                with c4:
+                    st.text_input("Organisation / institution (optional)",
+                                  key="nu_org", placeholder="University or team")
+                st.selectbox("Role", rbac.ROLES,
+                             format_func=lambda r: rbac.ROLE_LABELS[r],
+                             index=rbac.ROLES.index(rbac.DEFAULT_ROLE),
+                             key="nu_role")
+                c5, c6 = st.columns(2)
+                with c5:
+                    st.text_input("Initial password", type="password",
+                                  key="nu_password",
+                                  autocomplete="new-password")
+                with c6:
+                    st.text_input("Confirm initial password", type="password",
+                                  key="nu_confirm",
+                                  autocomplete="new-password")
+                submitted = st.form_submit_button(
+                    "Create account", type="primary",
+                    icon=":material/person_add:", width="stretch")
+            if submitted:
+                result = service.admin_create_user(
+                    actor,
+                    full_name=st.session_state.get("nu_full_name", ""),
+                    email=st.session_state.get("nu_email", ""),
+                    username=st.session_state.get("nu_username", ""),
+                    organisation=st.session_state.get("nu_org", ""),
+                    role=st.session_state.get("nu_role", rbac.DEFAULT_ROLE),
+                    password=st.session_state.get("nu_password", ""),
+                    confirm_password=st.session_state.get("nu_confirm", ""))
+                if result.ok:
+                    st.session_state.pop("nu_password", None)
+                    st.session_state.pop("nu_confirm", None)
+                    st.session_state["um_notice"] = (result.info, "success")
+                    st.rerun()
+                for error in result.errors:
+                    st.error(error)
+            st.caption("The account starts unverified: a verification link is "
+                       "emailed when delivery is configured. Passwords are "
+                       "hashed with argon2id and never logged - share the "
+                       "initial password over a channel you trust and ask the "
+                       "user to change it after signing in.")
 
         with ui.card("Manage an account", "settings",
                      "Role and status changes apply immediately and are "
@@ -217,6 +284,13 @@ def render() -> None:
                 st.caption("Permissions: " + ", ".join(
                     sorted(rbac.PERMISSIONS[role])))
                 st.divider()
+            ui.note(
+                "Public registration is <b>"
+                + ("open" if auth_settings.ALLOW_REGISTRATION else "closed")
+                + "</b> on this deployment "
+                "(<code>AI_SOC_ALLOW_REGISTRATION</code>). When it is closed, "
+                "the signup page says so and accounts are added with the "
+                "<b>Add a user</b> card on the Users tab.", "info", ui.ACCENT)
             ui.note(
                 "Initial administrator provisioning is operator-run: "
                 "<code>python scripts/provision_admin.py</code> (hidden "
