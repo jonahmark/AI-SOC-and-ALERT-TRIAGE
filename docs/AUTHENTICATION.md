@@ -98,6 +98,8 @@ Guards against self-escalation and lockout:
 | `dashboard/auth_ui.py` | Branded sign-in / signup / recovery / reset / verification pages, session gate, remember-me cookie bridge, account panel |
 | `dashboard/pages/user_management.py` | Admin-only user / role / session / audit management |
 | `scripts/provision_admin.py` | Operator-run secure bootstrap of the first administrator |
+| `src/auth/migration.py` | Read-only SQLite → empty PostgreSQL account transfer (validation, re-encryption, atomic verify) |
+| `scripts/migrate_accounts.py` | Operator CLI: inspect local accounts, or `--apply` to import into an empty private database |
 
 Storage defaults to `data/processed/auth.db`. Tables: `users`, `sessions`,
 `reset_tokens`, `verify_tokens`, `password_history`, `totp_credentials`,
@@ -277,6 +279,70 @@ As of 2026-11-09 this prototype is deployed **LAN-only**:
   be exposed publicly because session cookies and credentials would travel
   unencrypted.
 
+### Private PostgreSQL storage (optional, for cloud deployments)
+
+Local installs keep using SQLite at `data/processed/auth.db` — nothing changes
+for them. A hosted deployment (e.g. Streamlit Community Cloud) has **ephemeral
+local disk**, so accounts written to SQLite there disappear on every restart.
+For durable cloud accounts, point the app at a private PostgreSQL database:
+
+- Set `AI_SOC_AUTH_DATABASE_URL` to a `postgresql://` (or `postgres://`) URI.
+  A non-blank URL selects PostgreSQL **with no SQLite fallback**; if it is
+  unreachable the app fails closed rather than silently writing to a throwaway
+  local file.
+- TLS is always `verify-full`. The CA defaults to `certifi`; an explicit
+  `sslrootcert` in the URI is honoured. Unix-socket hosts are rejected (libpq
+  does not apply TLS to sockets), and GSS encryption is disabled so it cannot
+  take precedence over TLS.
+- The URI is a **secret**. Supply it only through protected settings — on
+  Streamlit Cloud, the app's *Secrets* manager. The app bridges `AI_SOC_*`
+  secret keys into its configuration at startup; real environment variables
+  win. Never commit a real URL, and never paste it into chat or logs. Storage
+  errors are sanitised so a failure never echoes the URI or SQL values.
+- Schema initialisation is serialised across processes with an advisory lock;
+  all queries remain parameterised.
+
+### Migrating local accounts to a private cloud database
+
+`scripts/migrate_accounts.py` copies existing local accounts (with their
+working passwords) into an **empty** private PostgreSQL database. It is
+operator-run and deliberately conservative:
+
+```bash
+# 1. Inspect only — reads the local SQLite file, makes no cloud connection.
+python scripts/migrate_accounts.py
+
+# 2. Import into an empty destination (prompts for the URI via hidden input).
+python scripts/migrate_accounts.py --apply
+```
+
+Safety properties:
+
+- **Read-only source.** The SQLite file is opened read-only inside a
+  transaction, passes `quick_check`, and its transferred tables pass a
+  referential-integrity check before anything is read. The source is never
+  modified. (Orphaned rows in discarded tables — e.g. single-use tokens left
+  behind by a deleted account — do not block the transfer.)
+- **Empty destination only.** All nine auth tables are locked and checked; if
+  any already contains data the import refuses and overwrites nothing. Use a
+  fresh database.
+- **Atomic + verified.** Inserts run in one transaction; per-table row counts
+  are verified and any mismatch rolls the whole import back.
+- **Passwords preserved, never re-hashed.** Argon2id hashes are validated and
+  copied as-is, so existing passwords keep working. Only Argon2id is accepted.
+- **MFA re-encrypted.** Enabled TOTP enrolments are decrypted with the source
+  `AI_SOC_TOTP_KEY` and re-encrypted with a destination key you supply; the
+  destination key must then be set as `AI_SOC_TOTP_KEY` in cloud secrets.
+  Missing/invalid keys fail before any write.
+- **No live credentials copied.** Sessions, recovery/verification tokens,
+  pending MFA challenges, login-attempt history and the audit log are *not*
+  transferred — everyone signs in fresh. An `accounts_migrated` audit event is
+  recorded in the destination.
+
+After a successful import, set `AI_SOC_AUTH_DATABASE_URL` (and the destination
+`AI_SOC_TOTP_KEY`, plus your email settings and a reachable `AI_SOC_APP_URL`)
+in the cloud app's secrets, redeploy, and verify sign-in with a real account.
+
 ### Transactional email providers (recommended for real use)
 
 For real delivery, use a transactional provider rather than a personal mailbox.
@@ -382,7 +448,8 @@ real secrets). Real environment variables override `.env`.
 | `AI_SOC_EMAIL_PROVIDER` | — | Preset: `sendgrid` / `brevo` / `mailgun` / `postmark` / `ses` / `gmail` (auto-fills host/port) |
 | `AI_SOC_APP_URL` | http://localhost:8501 | Public base for links |
 | `AI_SOC_SMTP_HOST/PORT/USER/PASSWORD/FROM/STARTTLS` | — | SMTP delivery (smtp mode) |
-| `AI_SOC_AUTH_DB` | data/processed/auth.db | Storage location |
+| `AI_SOC_AUTH_DB` | data/processed/auth.db | SQLite storage location (used when no PostgreSQL URL is set) |
+| `AI_SOC_AUTH_DATABASE_URL` | — | Private PostgreSQL URI; selects PostgreSQL with verified TLS, no SQLite fallback |
 
 ## Testing
 

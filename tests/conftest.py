@@ -91,9 +91,12 @@ def analysis_cache_sandbox(tmp_path, monkeypatch):
 def auth_sandbox(tmp_path, monkeypatch):
     """Every test gets a throwaway auth database and mail outbox, so no
     test ever reads or writes the project's real user store."""
+    # Cloud credentials must never select a remote store in existing tests.
+    monkeypatch.setenv("AI_SOC_AUTH_DATABASE_URL", "")
     from src.auth import db as auth_db
     from src.auth import settings as auth_settings
     from cryptography.fernet import Fernet
+    monkeypatch.setattr(auth_settings, "AUTH_DATABASE_URL", "")
     monkeypatch.setattr(auth_settings, "AUTH_DB_PATH", tmp_path / "auth.db")
     monkeypatch.setattr(auth_settings, "MAIL_OUTBOX_DIR",
                         tmp_path / "mail_outbox")

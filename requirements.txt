@@ -12,6 +12,7 @@ reportlab==5.1.0
 pytest==9.2.0
 requests==2.34.2
 argon2-cffi==25.1.0
+psycopg[binary]==3.3.9
 pyotp==2.10.0
 qrcode==8.2
 cryptography==50.0.2

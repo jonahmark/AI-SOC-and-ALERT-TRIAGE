@@ -40,7 +40,9 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-# Storage. Tests point AI_SOC_AUTH_DB at a temporary file.
+# Storage. A private PostgreSQL URL opts in; otherwise SQLite is unchanged.
+# Tests clear the URL and point AI_SOC_AUTH_DB at a temporary file.
+AUTH_DATABASE_URL = os.environ.get('AI_SOC_AUTH_DATABASE_URL', '').strip()
 AUTH_DB_PATH = Path(os.environ.get(
     "AI_SOC_AUTH_DB", str(config.DATA_PROCESSED_DIR / "auth.db")))
 

@@ -567,7 +567,7 @@ def resend_verification(email: str) -> AuthResult:
             and user["account_status"] == "active":
         latest = store.query_one(
             "SELECT created_at FROM verify_tokens WHERE user_id = ? "
-            "ORDER BY created_at DESC, rowid DESC LIMIT 1", (user["user_id"],))
+            "ORDER BY created_at DESC LIMIT 1", (user["user_id"],))
         cooldown_ok = True
         if latest is not None:
             age = (_now() - datetime.fromisoformat(

@@ -25,8 +25,11 @@ from src.auth import settings as auth_settings  # noqa: E402
 
 def main() -> int:
     print("AI-SOC administrator provisioning")
-    print(f"Account database: {auth_settings.AUTH_DB_PATH.name} "
-          "(project-relative data directory)")
+    if auth_settings.AUTH_DATABASE_URL:
+        print("Account database: private PostgreSQL (verified TLS)")
+    else:
+        print(f"Account database: {auth_settings.AUTH_DB_PATH.name} "
+              "(project-relative data directory)")
     print("Password policy: 12+ characters with upper, lower, number and "
           "special character.\n")
     full_name = input("Full name: ").strip()

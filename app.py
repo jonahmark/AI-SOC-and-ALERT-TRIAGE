@@ -9,6 +9,7 @@ Run:  streamlit run app.py
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -17,6 +18,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import streamlit as st
+
+# Streamlit Community Cloud delivers app secrets through st.secrets. Parsing
+# them promotes string/number entries into os.environ; force that parse here
+# so the auth settings imported below see cloud values on first load. Boolean
+# AI_SOC_* entries are normalised to "1"/"0" the same way.
+if st.secrets.load_if_toml_exists():
+    for _name, _value in st.secrets.to_dict().items():
+        if _name.startswith("AI_SOC_") and isinstance(_value, bool):
+            os.environ.setdefault(_name, "1" if _value else "0")
 
 import config
 from dashboard import auth_ui, common, components as ui, nav
