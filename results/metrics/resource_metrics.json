@@ -1,0 +1,124 @@
+{
+  "collected_at": "2026-11-09T20:20:07+0300",
+  "system": {
+    "timestamp": "2026-11-09T20:20:07+0300",
+    "process_cpu_percent": 92.8,
+    "process_memory_mb": 501.6,
+    "system_memory_total_mb": 8067.1,
+    "system_memory_available_mb": 1411.6,
+    "system_memory_percent_used": 82.5,
+    "cpu_count_logical": 4,
+    "platform": "Windows-11-10.0.26200-SP0",
+    "python_version": "3.14.3"
+  },
+  "measurements": {
+    "load_training_file": {
+      "wall_time_seconds": 0.9168,
+      "memory_before_mb": 182.2,
+      "memory_after_mb": 264.3,
+      "memory_delta_mb": 82.1,
+      "cpu_percent_during": 102.2
+    },
+    "load_testing_file": {
+      "wall_time_seconds": 0.1819,
+      "memory_before_mb": 264.3,
+      "memory_after_mb": 269.9,
+      "memory_delta_mb": 5.6,
+      "cpu_percent_during": 68.7
+    },
+    "preprocessing": {
+      "wall_time_seconds": 2.0646,
+      "memory_before_mb": 269.9,
+      "memory_after_mb": 344.1,
+      "memory_delta_mb": 74.2,
+      "cpu_percent_during": 71.9
+    },
+    "train_isolation_forest": {
+      "wall_time_seconds": 10.7581,
+      "memory_before_mb": 380.8,
+      "memory_after_mb": 409.2,
+      "memory_delta_mb": 28.4,
+      "cpu_percent_during": 173.1
+    },
+    "train_random_forest": {
+      "wall_time_seconds": 30.6921,
+      "memory_before_mb": 412.9,
+      "memory_after_mb": 438.8,
+      "memory_delta_mb": 25.9,
+      "cpu_percent_during": 186.3
+    },
+    "train_xgboost": {
+      "wall_time_seconds": 76.7188,
+      "memory_before_mb": 443.5,
+      "memory_after_mb": 443.8,
+      "memory_delta_mb": 0.3,
+      "cpu_percent_during": 242.9
+    },
+    "anomaly_inference_test": {
+      "wall_time_seconds": 0.7388,
+      "memory_before_mb": 452.9,
+      "memory_after_mb": 452.9,
+      "memory_delta_mb": 0.1,
+      "cpu_percent_during": 90.9
+    },
+    "random_forest_inference_test": {
+      "wall_time_seconds": 0.3055,
+      "memory_before_mb": 453.7,
+      "memory_after_mb": 457.1,
+      "memory_delta_mb": 3.4,
+      "cpu_percent_during": 281.1
+    },
+    "random_forest_prediction_latency": {
+      "batch_seconds": 0.130446,
+      "n_records": 5000,
+      "mean_ms_per_record": 0.026089,
+      "throughput_records_per_second": 38330.0,
+      "repeats": 3
+    },
+    "xgboost_inference_test": {
+      "wall_time_seconds": 0.427,
+      "memory_before_mb": 458.4,
+      "memory_after_mb": 458.6,
+      "memory_delta_mb": 0.2,
+      "cpu_percent_during": 267.0
+    },
+    "xgboost_prediction_latency": {
+      "batch_seconds": 0.089581,
+      "n_records": 5000,
+      "mean_ms_per_record": 0.017916,
+      "throughput_records_per_second": 55815.5,
+      "repeats": 3
+    },
+    "isolation_forest_prediction_latency": {
+      "batch_seconds": 0.205976,
+      "n_records": 5000,
+      "mean_ms_per_record": 0.041195,
+      "throughput_records_per_second": 24274.7,
+      "repeats": 3
+    },
+    "global_shap_computation": {
+      "wall_time_seconds": 0.8838,
+      "memory_before_mb": 487.9,
+      "memory_after_mb": 489.4,
+      "memory_delta_mb": 1.5,
+      "cpu_percent_during": 293.4
+    },
+    "alert_generation": {
+      "wall_time_seconds": 0.868,
+      "memory_before_mb": 489.4,
+      "memory_after_mb": 500.5,
+      "memory_delta_mb": 11.1,
+      "cpu_percent_during": 99.0
+    },
+    "isolation_forest_size_mb": 33.065,
+    "random_forest_size_mb": 25.765,
+    "xgboost_size_mb": 2.28,
+    "preprocessing_size_mb": 0.003
+  },
+  "model_files": {
+    "isolation_forest_size_mb": 33.065,
+    "random_forest_size_mb": 25.765,
+    "xgboost_size_mb": 2.28,
+    "preprocessing_size_mb": 0.003
+  }
+}

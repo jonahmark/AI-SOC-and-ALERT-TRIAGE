@@ -3,7 +3,7 @@
 The dashboard's default analysis (full dataset, no on-demand SHAP) is written
 to ``data/processed/analysis_cache/`` so a restarted server can reuse the last
 real result instead of re-running the pipeline. Frames are stored as parquet
-(exact dtypes, no new dependency - pyarrow is already installed); stage timings
+(exact dtypes; pyarrow is pinned in requirements.txt); stage timings
 and meta are JSON.
 
 Nothing here fabricates results: a persisted entry is only reused when its key

@@ -1,0 +1,27 @@
+{
+  "trained_at": "2026-11-07T20:57:29+0300",
+  "random_seed": 42,
+  "dataset": "NSL-KDD",
+  "dataset_source": "Tavallaee et al., 'A Detailed Analysis of the KDD CUP 99 Data Set' (2009). Files: KDDTrain+.txt / KDDTest+.txt",
+  "train_file": "KDDTrain+.txt",
+  "test_file": "KDDTest+.txt",
+  "n_train_records": 125973,
+  "n_test_records": 22544,
+  "n_normal_train_records": 67343,
+  "n_encoded_features": 122,
+  "anomaly_threshold": -0.4048765359019971,
+  "anomaly_threshold_method": "5% quantile of normal training anomaly scores (unsupervised; nominal 5% FPR on normal traffic; no attack labels or test data used)",
+  "primary_classifier": "xgboost",
+  "library_versions": {
+    "python": "3.14.3",
+    "scikit-learn": "1.9.1",
+    "xgboost": "3.4.1",
+    "pandas": "3.1.1",
+    "numpy": "2.5.4"
+  },
+  "train_times_seconds": {
+    "isolation_forest": 9.45,
+    "random_forest": 48.58,
+    "xgboost": 101.08
+  }
+}
