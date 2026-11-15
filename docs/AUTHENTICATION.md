@@ -283,22 +283,31 @@ clear it after testing.
 - **No internet exposure for this instance.** Plain HTTP must not be exposed
   publicly because session cookies and credentials would travel unencrypted.
 
-**Hosted instance — public HTTPS on Streamlit Cloud (since 2026-11-15):**
+**Hosted instance — Streamlit Cloud, HTTPS, viewer-restricted (since 2026-11-15):**
 
-- `AI_SOC_APP_URL` is the public app URL, so emailed links open from any
-  device; the platform terminates TLS, so `Secure` cookies apply.
+- **Viewing is restricted by the platform, not by the app.** Checked
+  2026-11-15: an anonymous request to the app root returns `303` to
+  Streamlit's sign-in gate (`share.streamlit.io/-/auth/app`), and the owner's
+  Share panel offers a "Make this app public" action — public viewing is not
+  enabled. Only the owner and invited viewers reach the app's sign-in page.
+  The operator chose to keep it restricted. (The inner `/~/+/` path and its
+  `/_stcore/health` do answer anonymously, so those alone do not prove the app
+  is publicly viewable.)
+- `AI_SOC_APP_URL` is the hosted app URL, so emailed links open from any
+  device that can view the app; the platform terminates TLS, so `Secure`
+  cookies apply.
 - Accounts, sessions, tokens and audit events live in a private PostgreSQL
   database (`AI_SOC_AUTH_DATABASE_URL`, set in the platform's owner-only
   Secrets manager). The local instance keeps its own SQLite store unless the
   same URL is configured there too.
-- Registration policy: set `AI_SOC_ALLOW_REGISTRATION=0` in the app's Secrets
-  so accounts are administrator-provisioned and strangers cannot create
-  accounts or trigger signup email. This is the chosen policy for the hosted
-  instance; it takes effect only once the operator adds that secret (the
-  default is open signup).
-- The email budget and login-work cap matter most here: the URL is public and
-  the container has a 1 GB RAM ceiling, so unbounded argon2id work or provider
-  quota burn is a real denial-of-service risk.
+- `AI_SOC_ALLOW_REGISTRATION=0` is set in the app's Secrets (applied and
+  verified live on 2026-11-15): the signup page renders the closed notice
+  instead of a form, and administrators add people in **User Management →
+  Add a user**.
+- The email budget, login-work cap and retention pruning are defence in depth
+  behind that viewer gate, and become the primary protection if public
+  viewing is ever enabled: the container has a 1 GB RAM ceiling, so unbounded
+  argon2id work or provider quota burn is a real denial-of-service risk.
 - The container disk is ephemeral — triage state and analysis caches reset on
   redeploy. Authentication state survives because it is in PostgreSQL.
 
@@ -418,8 +427,11 @@ Per-identifier controls:
   be used to enumerate accounts. Login failures always return an identical
   generic message; disabled accounts are indistinguishable from bad passwords.
 
-Deployment-wide controls (added 2026-11-15, when the app became publicly
-reachable on Streamlit Cloud):
+Deployment-wide controls (added 2026-11-15 for the hosted Streamlit Cloud
+deployment). The hosted app is currently viewer-restricted by the platform
+(see "Deployment & reachability"), so there these are defence in depth; they
+become the primary protection if public viewing is enabled, and they apply to
+any self-hosted instance that is reachable from the internet:
 
 - **Registration policy.** `AI_SOC_ALLOW_REGISTRATION=0` closes public signup:
   the signup page renders an honest "registration is closed" notice instead of
@@ -585,13 +597,14 @@ so the suite never touches your real accounts or analyst state. Full suite:
 Decisions recorded 2026-11-09 (security-hardening phase), with the reasoning
 so a future operator can revisit them:
 
-- **Exposure: local instance LAN-only over plain HTTP; cloud instance public
-  over HTTPS.** The WSL dashboard is reachable only from the local subnet
-  (Private-profile firewall rule plus a Windows portproxy to the WSL port).
-  The Streamlit Cloud deployment is public and TLS-terminated by the platform,
-  so session cookies and token-bearing email links are encrypted there.
-  Nothing in the app terminates TLS itself — never expose the local instance
-  to the internet without a TLS-terminating reverse proxy.
+- **Exposure: local instance LAN-only over plain HTTP; cloud instance over
+  HTTPS, restricted to invited viewers.** The WSL dashboard is reachable only
+  from the local subnet (Private-profile firewall rule plus a Windows portproxy
+  to the WSL port). The Streamlit Cloud deployment is TLS-terminated by the
+  platform and its viewer gate is left enabled, so session cookies and
+  token-bearing email links are encrypted there and strangers cannot reach the
+  sign-in page. Nothing in the app terminates TLS itself — never expose the
+  local instance to the internet without a TLS-terminating reverse proxy.
 - **Secrets: `.env` locally, platform Secrets manager on cloud.** For a
   single-node research prototype this is proportionate: the SMTP key and the
   TOTP encryption key live in a gitignored `.env` with operator-only access,
@@ -608,15 +621,22 @@ so a future operator can revisit them:
   against immediate reuse.
 
 Decisions recorded 2026-11-15 (public-exposure hardening), after an audit of
-what an anonymous visitor can do on the public cloud URL:
+what a visitor can do on the hosted cloud URL:
 
-- **Cloud registration is administrator-provisioned.** Open signup let anyone
-  create accounts, consume the SendGrid quota with verification mail to
-  arbitrary addresses (a sender-reputation risk as well as a quota risk), and
-  fill the database with junk. The chosen policy is `AI_SOC_ALLOW_REGISTRATION=0`
-  in the cloud Secrets (operator-added; not yet applied at the time of writing),
-  while the local instance keeps open signup for convenience. The operator chose
-  this over invite codes and over leaving signup open.
+- **The hosted app stays viewer-restricted.** Measured, not assumed: anonymous
+  requests to the app root are redirected to Streamlit's sign-in gate and the
+  owner's Share panel still offers "Make this app public". The operator chose
+  to keep that gate enabled rather than open the app to anyone with the link.
+  The app-level controls below are therefore defence in depth today, and the
+  precondition for safely enabling public viewing later.
+- **Cloud registration is administrator-provisioned.** Open signup would let
+  any viewer create accounts, consume the SendGrid quota with verification mail
+  to arbitrary addresses (a sender-reputation risk as well as a quota risk), and
+  fill the database with junk. `AI_SOC_ALLOW_REGISTRATION=0` was added to the
+  cloud Secrets and verified live on 2026-11-15 (closed notice, no signup form,
+  no "Create an account" button on the login page); the local instance keeps
+  open signup for convenience. The operator chose this over invite codes and
+  over leaving signup open.
 - **Caps that do not depend on client IP.** Per-IP limiting is not trustworthy
   here (see the abuse-protection section), so the budget, login-work cap and
   registration policy are deployment-wide and account-scoped instead.
@@ -636,6 +656,10 @@ what an anonymous visitor can do on the public cloud URL:
   private PostgreSQL URI (used by the cloud deployment) lets instances share
   accounts, but the app itself does not scale horizontally and rate limits are
   enforced in the database rather than a distributed cache.
+- **The hosted viewer gate is a platform setting, not app code.** Nothing in
+  this repository enforces it: anyone with owner access can enable public
+  viewing from the Share panel. Re-check it after any change of hosting or
+  ownership, and keep the app-level controls configured regardless.
 - **No trustworthy client IP behind the platform proxy.** Abuse controls are
   deployment-wide and per-account, not per-IP, so a determined visitor can
   still consume a share of the email budget within the caps.

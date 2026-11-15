@@ -473,9 +473,10 @@ Current total: **408 passing tests**.
   devices on the same network, and the firewall rule "AI-SOC Streamlit (LAN)" allows
   TCP 8501 only from the local subnet on Private profiles — no public HTTP exposure.
   The hosted instance runs on Streamlit Cloud over platform-terminated HTTPS with a
-  private PostgreSQL account store and the deployment-wide abuse caps above; its
-  public registration is closed by adding `AI_SOC_ALLOW_REGISTRATION=0` to the app's
-  Secrets — see
+  private PostgreSQL account store, closed public registration
+  (`AI_SOC_ALLOW_REGISTRATION=0` in the app's Secrets) and the deployment-wide abuse
+  caps above. Viewing there is restricted by the platform's own sign-in gate — the
+  hosted app is not open to anyone with the link — see
   [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md) ("Deployment & reachability").
 
 - Uploads are extension- and size-validated (`config.ALLOWED_UPLOAD_EXTENSIONS`,
