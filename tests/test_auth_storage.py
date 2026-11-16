@@ -7,6 +7,7 @@ from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 
 from src.auth import db, settings
+from src.postgres import StorageError
 
 
 @pytest.fixture
@@ -79,7 +80,7 @@ def test_postgres_preserves_parameter_binding(postgres_connection):
 def test_postgres_connection_failure_is_redacted_and_never_falls_back(monkeypatch):
     monkeypatch.setattr(settings, "AUTH_DATABASE_URL", "postgresql://user:private@db.example.test/accounts")
     monkeypatch.setattr(psycopg, "connect", MagicMock(side_effect=psycopg.OperationalError("password=private")))
-    with pytest.raises(db.AuthStorageError) as caught:
+    with pytest.raises(StorageError) as caught:
         db.get_store()
     assert "private" not in str(caught.value)
     assert caught.value.__suppress_context__
@@ -91,7 +92,7 @@ def test_postgres_query_failure_does_not_expose_values(postgres_connection):
     connection, _ = postgres_connection
     store = db.PostgresAuthStore("postgresql://user:private@db.example.test/accounts")
     connection.execute.side_effect = psycopg.errors.UniqueViolation("password_hash=private-hash")
-    with pytest.raises(db.AuthStorageError) as caught:
+    with pytest.raises(StorageError) as caught:
         store.execute("INSERT INTO users (user_id) VALUES (?)", ("duplicate",))
     assert "private-hash" not in str(caught.value)
     assert caught.value.__suppress_context__
@@ -100,7 +101,7 @@ def test_postgres_query_failure_does_not_expose_values(postgres_connection):
 @pytest.mark.parametrize("url", ["", "sqlite:///accounts.db", "not-a-database-url"])
 def test_invalid_postgres_configuration_is_rejected_without_connection(url, postgres_connection):
     _, connect = postgres_connection
-    with pytest.raises(db.AuthStorageError):
+    with pytest.raises(StorageError):
         db.PostgresAuthStore(url)
     connect.assert_not_called()
 
@@ -112,13 +113,13 @@ def test_invalid_postgres_configuration_is_rejected_without_connection(url, post
 ])
 def test_wrapped_url_rejected_with_actionable_message(url, postgres_connection):
     _, connect = postgres_connection
-    with pytest.raises(db.AuthStorageError, match="must start with postgresql://"):
+    with pytest.raises(StorageError, match="must start with postgresql://"):
         db.PostgresAuthStore(url)
     connect.assert_not_called()
 
 
 def test_unparseable_url_rejected_with_actionable_message(postgres_connection):
     _, connect = postgres_connection
-    with pytest.raises(db.AuthStorageError, match="could not be parsed"):
+    with pytest.raises(StorageError, match="could not be parsed"):
         db.PostgresAuthStore("postgresql://u:pa%zzss@db.example.test/accounts")
     connect.assert_not_called()

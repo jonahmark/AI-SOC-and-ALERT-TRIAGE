@@ -94,7 +94,9 @@ Guards against self-escalation and lockout:
 | Module | Responsibility |
 |---|---|
 | `src/auth/settings.py` | Environment-driven configuration (`.env` loaded as defaults; real env vars win) |
-| `src/auth/db.py` | SQLite (WAL) store, per-operation connections, parameterised queries, schema |
+| `src/env.py` | The shared `.env` defaults loader used by every settings module |
+| `src/postgres.py` | Shared PostgreSQL connectivity: verified TLS, parameter binding, credential-redacted failures |
+| `src/auth/db.py` | SQLite (WAL) store, per-operation connections, parameterised queries, schema; PostgreSQL auth tables on top of `src/postgres.py` |
 | `src/auth/security.py` | Argon2id hashing, token generation/digests, password policy + strength, text sanitisation |
 | `src/auth/mfa.py` | TOTP primitives: pyotp codes, Fernet secret encryption, QR/provisioning URI |
 | `src/auth/service.py` | All credential logic: register, authenticate, sessions, recovery, verification, RBAC admin actions, audit |
@@ -108,8 +110,14 @@ Guards against self-escalation and lockout:
 
 Storage defaults to `data/processed/auth.db`. Tables: `users`, `sessions`,
 `reset_tokens`, `verify_tokens`, `password_history`, `totp_credentials`,
-`totp_challenges`, `login_attempts`, and `audit_events`. Every query is
-parameterised; no SQL is built from user input.
+`totp_challenges`, `login_attempts`, `email_sends`, and `audit_events`. Every
+query is parameterised; no SQL is built from user input.
+
+The same private database may also hold the alert triage tables (`alert_statuses`,
+`alert_notes`), owned by `src/triage.py` and selected by `AI_SOC_TRIAGE_DATABASE_URL`
+(blank falls back to `AI_SOC_AUTH_DATABASE_URL`). They are bootstrapped under their
+own advisory lock and use the same verified-TLS connectivity; see the README's
+"Alert triage" section for the workflow semantics.
 
 ## Password policy and hashing
 
@@ -308,8 +316,11 @@ clear it after testing.
   behind that viewer gate, and become the primary protection if public
   viewing is ever enabled: the container has a 1 GB RAM ceiling, so unbounded
   argon2id work or provider quota burn is a real denial-of-service risk.
-- The container disk is ephemeral — triage state and analysis caches reset on
-  redeploy. Authentication state survives because it is in PostgreSQL.
+- The container disk is ephemeral — analysis caches and anything written locally
+  reset on redeploy. Authentication state survives because it is in PostgreSQL,
+  and triage statuses/notes survive there too when `AI_SOC_TRIAGE_DATABASE_URL`
+  (or its `AI_SOC_AUTH_DATABASE_URL` fallback) is set. The committed `alerts.csv`
+  is restored from the repository.
 
 ### Private PostgreSQL storage (optional, for cloud deployments)
 
@@ -333,6 +344,28 @@ For durable cloud accounts, point the app at a private PostgreSQL database:
   errors are sanitised so a failure never echoes the URI or SQL values.
 - Schema initialisation is serialised across processes with an advisory lock;
   all queries remain parameterised.
+
+### Triage state in the same database (optional)
+
+Alert investigation statuses and analyst notes default to JSON files beside
+`alerts.csv`. On a hosted deployment those files are ephemeral, so the same
+private database can hold them instead:
+
+- `AI_SOC_TRIAGE_DATABASE_URL` selects the triage database. Blank falls back to
+  `AI_SOC_AUTH_DATABASE_URL`, so a hosted deployment needs no extra secret.
+  Setting only the triage URL shares workflow state while local authentication
+  stays on SQLite.
+- Tables `alert_statuses` (one row per alert, upserted) and `alert_notes`
+  (append-only, read in insertion order) are created under their own advisory
+  lock, with the same verified TLS, parameter binding and redacted failures.
+- A configured database **fails closed**: there is no silent JSON fallback,
+  which would split workflow state across two stores.
+- **Shared rows are never pruned or cleared.** Alert IDs are regenerated per
+  run, so regenerating or clearing the queue on one instance must not delete
+  another instance's investigation history. Reads match the current alert IDs;
+  superseded rows stay in the database, invisible to the new queue.
+- The dashboard's alert cache has a 60-second TTL, so another instance's status
+  changes appear without a restart.
 
 ### Migrating local accounts to a private cloud database
 
@@ -546,6 +579,7 @@ real secrets). Real environment variables override `.env`.
 | `AI_SOC_SMTP_HOST/PORT/USER/PASSWORD/FROM/STARTTLS` | — | SMTP delivery (smtp mode) |
 | `AI_SOC_AUTH_DB` | data/processed/auth.db | SQLite storage location (used when no PostgreSQL URL is set) |
 | `AI_SOC_AUTH_DATABASE_URL` | — | Private PostgreSQL URI; selects PostgreSQL with verified TLS, no SQLite fallback |
+| `AI_SOC_TRIAGE_DATABASE_URL` | falls back to `AI_SOC_AUTH_DATABASE_URL` | Private PostgreSQL URI for alert statuses/notes; blank keeps them in JSON files |
 
 ## Testing
 
@@ -588,9 +622,17 @@ pytest tests/ -v
   session re-issuance, the MFA code step at login, account-panel TOTP
   enrol/disable and admin 2FA removal.
 
+- `tests/test_auth_storage.py` covers the storage backends: SQLite selection,
+  PostgreSQL verified TLS and parameter binding, redacted failures with no
+  fallback, and actionable rejection of malformed URIs.
+- `tests/test_triage.py` covers the triage state backends that share the same
+  PostgreSQL connectivity: real SQL execution against SQLite, shared rows
+  surviving another instance's regenerate/clear, backend selection and caching,
+  advisory-locked schema bootstrap, and redacted fail-closed errors.
+
 The auth fixtures redirect the database and mail outbox to a temporary folder,
 so the suite never touches your real accounts or analyst state. Full suite:
-**408 passing tests**.
+**436 passing tests**.
 
 ## Security posture and deferred items
 

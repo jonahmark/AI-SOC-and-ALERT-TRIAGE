@@ -5,12 +5,12 @@ An alert is generated when EITHER stage flags a record:
 - predicted attack category != Normal.
 
 The two stages remain separate decisions; the alert records both.
-Alerts persist to CSV so dashboard sessions share state; investigation
-statuses persist separately so regenerated alerts keep analyst workflow.
+Alerts persist to CSV so dashboard sessions share state. Investigation
+statuses and notes persist separately (JSON files, or a private PostgreSQL
+database when one is configured) so regenerated alerts keep analyst workflow.
 """
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -19,12 +19,13 @@ import numpy as np
 import pandas as pd
 
 import config
+from src import triage
 from src.anomaly_detection import AnomalyResult
 from src.attack_classification import ClassificationResult
 from src.severity_engine import SeverityEngine
 
 ALERTS_FILE = config.DATA_PROCESSED_DIR / "alerts.csv"
-STATUS_FILE = config.DATA_PROCESSED_DIR / "alert_statuses.json"
+STATUS_FILE = config.ALERT_STATUS_FILE
 NOTES_FILE = config.ALERT_NOTES_FILE
 
 ALERT_COLUMNS = [
@@ -137,7 +138,12 @@ class AlertGenerator:
 
 
 class AlertStore:
-    """CSV-backed alert persistence with investigation-status workflow."""
+    """CSV-backed alert persistence with investigation-status workflow.
+
+    Statuses and notes are held by a triage backend: JSON files by default, or
+    a private PostgreSQL database when one is configured (src/triage.py). The
+    JSON paths are unused in database mode.
+    """
 
     def __init__(self, alerts_file: Path = ALERTS_FILE,
                  status_file: Path = STATUS_FILE,
@@ -145,6 +151,7 @@ class AlertStore:
         self.alerts_file = Path(alerts_file)
         self.status_file = Path(status_file)
         self.notes_file = Path(notes_file)
+        self.state = triage.get_state(self.status_file, self.notes_file)
 
     # ----------------------------------------------------------- persistence
     def save(self, alerts: pd.DataFrame, merge: bool = True) -> None:
@@ -156,15 +163,13 @@ class AlertStore:
                 subset="alert_id", keep="first"
             ).reset_index(drop=True)
         alerts.to_csv(self.alerts_file, index=False)
-        known = set(alerts["alert_id"])
-        self._save_statuses(known)
-        self._prune_notes(known)
+        self.state.retain(set(alerts["alert_id"]))
 
     def load(self) -> pd.DataFrame:
         if not self.alerts_file.exists():
             return pd.DataFrame(columns=ALERT_COLUMNS)
         alerts = pd.read_csv(self.alerts_file)
-        statuses = self._load_statuses()
+        statuses = self.state.statuses()
         if statuses:
             alerts["investigation_status"] = alerts["alert_id"].map(
                 statuses
@@ -172,9 +177,9 @@ class AlertStore:
         return alerts
 
     def clear(self) -> None:
-        for f in (self.alerts_file, self.status_file, self.notes_file):
-            if f.exists():
-                f.unlink()
+        if self.alerts_file.exists():
+            self.alerts_file.unlink()
+        self.state.clear()
 
     # --------------------------------------------------------------- triage
     def update_status(self, alert_id: str, status: str) -> None:
@@ -185,21 +190,7 @@ class AlertStore:
         alerts = self.load()
         if alert_id not in set(alerts["alert_id"]):
             raise KeyError(f"Alert '{alert_id}' not found in the store.")
-        statuses = self._load_statuses()
-        statuses[alert_id] = status
-        self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        self.status_file.write_text(json.dumps(statuses, indent=2))
-
-    def _load_statuses(self) -> dict:
-        if self.status_file.exists():
-            return json.loads(self.status_file.read_text())
-        return {}
-
-    def _save_statuses(self, known_ids: set) -> None:
-        statuses = {k: v for k, v in self._load_statuses().items()
-                    if k in known_ids}
-        self.status_file.parent.mkdir(parents=True, exist_ok=True)
-        self.status_file.write_text(json.dumps(statuses, indent=2))
+        self.state.set_status(alert_id, status)
 
     # ---------------------------------------------------------------- notes
     def add_note(self, alert_id: str, text: str, author: str = "analyst") -> dict:
@@ -212,41 +203,21 @@ class AlertStore:
         alerts = self.load()
         if alert_id not in set(alerts["alert_id"]):
             raise KeyError(f"Alert '{alert_id}' not found in the store.")
-        notes = self._load_notes()
         entry = {
             "alert_id": alert_id,
             "author": str(author)[:80],
             "text": text,
             "created_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         }
-        notes.setdefault(alert_id, []).append(entry)
-        self.notes_file.parent.mkdir(parents=True, exist_ok=True)
-        self.notes_file.write_text(json.dumps(notes, indent=2))
+        self.state.add_note(alert_id, entry)
         return entry
 
     def get_notes(self, alert_id: str) -> list:
-        return list(self._load_notes().get(alert_id, []))
+        return self.state.notes(alert_id)
 
     def note_counts(self) -> dict:
         """Map alert_id -> number of notes, for table indicators."""
-        return {k: len(v) for k, v in self._load_notes().items() if v}
-
-    def _load_notes(self) -> dict:
-        if self.notes_file.exists():
-            try:
-                return json.loads(self.notes_file.read_text())
-            except json.JSONDecodeError:
-                return {}
-        return {}
-
-    def _prune_notes(self, known_ids: set) -> None:
-        notes = {k: v for k, v in self._load_notes().items() if k in known_ids}
-        if not notes:
-            if self.notes_file.exists():
-                self.notes_file.unlink()
-            return
-        self.notes_file.parent.mkdir(parents=True, exist_ok=True)
-        self.notes_file.write_text(json.dumps(notes, indent=2))
+        return self.state.note_counts()
 
     # -------------------------------------------------------------- queries
     @staticmethod

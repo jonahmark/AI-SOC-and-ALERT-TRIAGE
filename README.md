@@ -74,7 +74,8 @@ ai_soc_prototype/
 │   ├── preprocessing.py    # encoding pipeline, persisted config
 │   ├── anomaly_detection.py# Stage A: Isolation Forest
 │   ├── attack_classification.py # Stage B: RF + XGBoost
-│   ├── alert_generator.py  # alerts + store (status workflow and analyst notes)
+│   ├── alert_generator.py  # alerts + CSV store (status workflow and analyst notes)
+│   ├── triage.py           # triage state backends: JSON files or shared PostgreSQL
 │   ├── severity_engine.py  # severity map + transparent risk score
 │   ├── explainability.py   # SHAP global/local
 │   ├── resource_monitor.py # real CPU/RAM/latency/throughput measurements
@@ -82,6 +83,8 @@ ai_soc_prototype/
 │   ├── settings.py         # validated, persisted analyst-editable runtime settings + activity log
 │   ├── pipeline.py         # the seven measured stages shared by every page and test
 │   ├── analysis_cache.py   # disk persistence of the default analysis (survives restarts)
+│   ├── postgres.py         # shared PostgreSQL connectivity: verified TLS, redacted failures
+│   ├── env.py              # .env defaults loader shared by the settings modules
 │   ├── reporting.py        # report payload + real CSV/JSON/PDF exports
 │   └── auth/               # real authentication: settings, db, security, service, rbac, mail
 ├── dashboard/
@@ -280,9 +283,23 @@ An alert is created when **either** stage flags a record (anomalous OR predicted
 Normal). Each alert carries: unique ID, timestamp, detection status, predicted category,
 severity, risk score, model confidence, anomaly score, plain-language explanation,
 recommended action and investigation status (**New / Investigating / Resolved / False
-Positive**), persisted across sessions in `data/processed/`. Analysts can attach
-timestamped investigation notes (`alert_notes.json`); notes and statuses survive alert
-regeneration for alerts that still exist and are pruned for alerts that no longer do.
+Positive**). Alerts persist in `data/processed/alerts.csv`; analyst workflow state
+(statuses and timestamped investigation notes) persists separately, in one of two backends:
+
+- **JSON files (default).** `alert_statuses.json` and `alert_notes.json` beside the CSV.
+  Notes and statuses survive alert regeneration for alerts that still exist and are pruned
+  for alerts that no longer do.
+- **Private PostgreSQL (optional).** Set `AI_SOC_TRIAGE_DATABASE_URL` (blank falls back to
+  `AI_SOC_AUTH_DATABASE_URL`) and workflow state lives in the `alert_statuses` /
+  `alert_notes` tables over verified TLS, so it survives redeploys and is shared by every
+  instance pointing at that database. On Streamlit Cloud the existing
+  `AI_SOC_AUTH_DATABASE_URL` secret is enough — no new secret is needed. A
+  configured database fails closed: there is no silent fallback to JSON. Alert IDs are
+  regenerated per run, so shared rows are **never** pruned or cleared by regenerating or
+  clearing alerts on one instance; reads match the current alert IDs, which keeps
+  superseded rows invisible instead of deleting another analyst's work. The dashboard's
+  alert cache refreshes every 60 s, so another instance's status changes appear without a
+  restart.
 
 **Severity map** (initial research rules in `config.SEVERITY_MAP`, editable and validated
 on the System Settings page — *not* a professionally validated SOC risk framework):
@@ -408,7 +425,13 @@ password history, idle session timeout, TOTP two-factor enrol/login/disable
 public-exposure controls (closed registration, email budgets, login-work cap,
 retention pruning).
 The auth fixtures redirect the database and mail outbox to a temporary folder.
-Current total: **408 passing tests**.
+
+`tests/test_triage.py` covers the triage state backends: the database backend's SQL is
+executed for real against SQLite (status upserts, note ordering, parameter binding,
+non-ASCII text), shared rows survive another instance's regenerate/clear, and backend
+selection, per-target caching, verified-TLS schema bootstrap and redacted fail-closed
+errors are checked against a mocked driver. No test contacts a real database.
+Current total: **436 passing tests**.
 
 ## Sample demonstration workflow
 
@@ -455,6 +478,10 @@ Current total: **408 passing tests**.
   times, so time-trend charts are intentionally not shown as if they were traffic trends.
 - **False negatives are possible** and are quantified (FNR, confusion matrices) rather than
   claimed away.
+- **Triage history is keyed by alert ID.** IDs are generated per run, so statuses and notes
+  follow an alert queue rather than the underlying record. Two instances share workflow state
+  only when they also share the same `alerts.csv`; regenerating a queue produces new IDs and
+  the superseded rows remain in the database, invisible to the new queue.
 
 ## Future improvements (proposed, not implemented)
 
@@ -473,7 +500,7 @@ Current total: **408 passing tests**.
   devices on the same network, and the firewall rule "AI-SOC Streamlit (LAN)" allows
   TCP 8501 only from the local subnet on Private profiles — no public HTTP exposure.
   The hosted instance runs on Streamlit Cloud over platform-terminated HTTPS with a
-  private PostgreSQL account store, closed public registration
+  private PostgreSQL account and triage store, closed public registration
   (`AI_SOC_ALLOW_REGISTRATION=0` in the app's Secrets) and the deployment-wide abuse
   caps above. Viewing there is restricted by the platform's own sign-in gate — the
   hosted app is not open to anyone with the link — see
@@ -508,3 +535,9 @@ Current total: **408 passing tests**.
   open and are audited, never reported as a clean result.
 - Destructive actions in the UI (regenerating the alert store, resetting settings, closing
   an alert) require an explicit confirmation step.
+- Triage workflow state (statuses, notes) lives either in local JSON files or in the private
+  PostgreSQL database (`AI_SOC_TRIAGE_DATABASE_URL`, falling back to
+  `AI_SOC_AUTH_DATABASE_URL`). Database mode reuses authentication's verified-TLS,
+  parameterised, credential-redacted connectivity and fails closed — it never silently falls
+  back to JSON, which would split workflow state across two stores. Shared rows are not
+  deleted when one instance regenerates or clears its own alert queue.

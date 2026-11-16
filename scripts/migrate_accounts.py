@@ -12,8 +12,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from src.auth import settings as auth_settings
-from src.auth.db import AuthStorageError
 from src.auth.migration import MigrationError, inspect_accounts, migrate_accounts
+from src.postgres import StorageError
 
 
 def _private_input(variable: str, prompt: str) -> str:
@@ -48,7 +48,7 @@ def main() -> int:
             args.source, database_url, source_totp_key=auth_settings.TOTP_KEY,
             destination_totp_key=destination_key,
         )
-    except (MigrationError, AuthStorageError) as exc:
+    except (MigrationError, StorageError) as exc:
         print(f"Import could not be confirmed: {exc}", file=sys.stderr)
         return 1
     except (KeyboardInterrupt, EOFError):

@@ -1,9 +1,11 @@
 """Page 4 - Alert Management (triage workspace).
 
 Alerts come from the persisted store produced by real model runs. Analyst
-workflow changes (status, notes) are written back to disk. Recommendations are
-rule-based suggestions generated from the predicted category - they are
-labelled as suggestions, never as confirmed incident-response actions.
+workflow changes (status, notes) are written to the configured triage store:
+JSON files, or the shared PostgreSQL database on a hosted deployment.
+Recommendations are rule-based suggestions generated from the predicted
+category - they are labelled as suggestions, never as confirmed
+incident-response actions.
 """
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ import streamlit as st
 import config
 from src import settings as settings_module
 from src.auth import rbac
+from src.postgres import StorageError
 from src.severity_engine import SeverityEngine
 from dashboard import auth_ui, common
 from dashboard import components as ui
@@ -38,6 +41,9 @@ def _set_status(store, alert_id: str, new_status: str) -> None:
         store.update_status(alert_id, new_status)
     except (KeyError, ValueError) as exc:
         st.error(str(exc))
+        return
+    except StorageError as exc:
+        st.error(f"Status was not saved: {exc}")
         return
     common.invalidate_alerts()
     settings_module.log(f"Alert {alert_id} status -> {new_status}.")
@@ -80,6 +86,8 @@ def render() -> None:
     settings = common.get_settings()
     models = common.get_models()
     store = common.get_alert_store()
+    triage_target = ("the shared PostgreSQL triage store"
+                     if store.state.shared else "disk")
     alerts = common.get_alerts()
     actor = auth_ui.current_user()
     can_triage = actor is not None and rbac.can(actor["role"], "triage_alerts")
@@ -414,7 +422,7 @@ def render() -> None:
                 )
 
         with ui.card("Investigation workflow", "user",
-                     "Status changes and notes are persisted to disk",
+                     f"Status changes and notes are persisted to {triage_target}",
                      key="am_workflow"):
             c1, c2 = st.columns([1.4, 1])
             with c1:
@@ -466,6 +474,8 @@ def render() -> None:
                 st.rerun()
             except (KeyError, ValueError) as exc:
                 st.error(str(exc))
+            except StorageError as exc:
+                st.error(f"Note was not saved: {exc}")
 
     # ------------------------------------------------- regenerate alerts
     with ui.card("Regenerate the alert store", "refresh",
@@ -475,11 +485,19 @@ def render() -> None:
         if drift:
             ui.note("Current configuration differs from the research defaults: "
                     + "; ".join(drift), "info", "#EAB308")
+        retention = (
+            "Statuses and notes already saved in the shared triage store are "
+            "kept against their alert IDs, so regenerating here never deletes "
+            "another analyst's work."
+            if store.state.shared else
+            "Statuses and notes belonging to alerts that no longer exist are "
+            "discarded."
+        )
         st.caption(
             "This replaces the stored alerts with a fresh run over "
             f"{settings['dataset']} using {settings['classifier']} and the "
-            "configured threshold, severity map and risk weights. Statuses and "
-            "notes belonging to alerts that no longer exist are discarded."
+            "configured threshold, severity map and risk weights. "
+            + retention
         )
         confirm = st.checkbox("I understand the existing alert queue will be "
                               "replaced.", key="am_regen_confirm")

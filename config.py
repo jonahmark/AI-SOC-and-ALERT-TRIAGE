@@ -30,6 +30,7 @@ MODEL_FILES = {
 PIPELINE_STATE_FILE = MODELS_DIR / "pipeline_state.json"
 
 # Dashboard-side persisted state (analyst workflow + user configuration).
+ALERT_STATUS_FILE = DATA_PROCESSED_DIR / "alert_statuses.json"
 ALERT_NOTES_FILE = DATA_PROCESSED_DIR / "alert_notes.json"
 APP_SETTINGS_FILE = DATA_PROCESSED_DIR / "app_settings.json"
 APP_LOG_FILE = RESULTS_DIR / "app_activity.log"

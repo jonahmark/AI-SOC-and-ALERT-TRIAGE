@@ -110,7 +110,9 @@ def get_alert_store():
     return AlertStore()
 
 
-@st.cache_data(show_spinner="Loading alerts")
+# A short TTL lets a shared triage database show another instance's status
+# changes without restarting this one.
+@st.cache_data(show_spinner="Loading alerts", ttl=60)
 def get_alerts() -> pd.DataFrame:
     return get_alert_store().load()
 

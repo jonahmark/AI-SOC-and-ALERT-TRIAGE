@@ -111,6 +111,18 @@ def auth_sandbox(tmp_path, monkeypatch):
     auth_db.reset_store_registry()
 
 
+@pytest.fixture(autouse=True)
+def triage_sandbox(monkeypatch):
+    """Triage state stays on the caller's JSON paths: no test may select the
+    operator's real shared database."""
+    from src import triage
+    monkeypatch.setenv("AI_SOC_TRIAGE_DATABASE_URL", "")
+    monkeypatch.setattr(triage, "TRIAGE_DATABASE_URL", "")
+    triage.reset_state_registry()
+    yield
+    triage.reset_state_registry()
+
+
 @pytest.fixture
 def admin_user():
     from src.auth import service

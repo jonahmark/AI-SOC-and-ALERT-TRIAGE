@@ -152,6 +152,54 @@ def test_analyst_note_persists_and_is_displayed(sandbox, admin_token):
 
 
 @requires_artefacts
+@pytest.mark.parametrize("shared", [False, True])
+def test_workflow_wording_names_the_triage_backend(sandbox, admin_token,
+                                                   monkeypatch, tmp_path,
+                                                   shared):
+    if shared:
+        from src import triage
+        from tests.test_triage import SqliteTriageStore
+        state = triage.DatabaseTriageState(
+            SqliteTriageStore(tmp_path / "triage.db"))
+        monkeypatch.setattr(triage, "get_state", lambda *a, **k: state)
+    at = _run("alert_management", admin_token)
+    assert not at.exception, [e.message for e in at.exception]
+    rendered = " ".join(str(m.value) for m in at.markdown)
+    target = "the shared PostgreSQL triage store" if shared else "disk"
+    assert f"Status changes and notes are persisted to {target}" in rendered
+    captions = " ".join(str(c.value) for c in at.caption)
+    if shared:
+        assert "never deletes another analyst's work" in captions
+    else:
+        assert "no longer exist are discarded" in captions
+
+
+@requires_artefacts
+def test_status_and_note_writes_reach_the_shared_database(sandbox, admin_token,
+                                                          monkeypatch, tmp_path):
+    from src import triage
+    from tests.test_triage import SqliteTriageStore
+    state = triage.DatabaseTriageState(SqliteTriageStore(tmp_path / "triage.db"))
+    monkeypatch.setattr(triage, "get_state", lambda *a, **k: state)
+    at = _run("alert_management", admin_token)
+    alert_id = _picked_alert_id(at)
+    _widget(at.selectbox, f"am_status_{alert_id}").set_value("Investigating")
+    at = at.run()
+    at = _widget(at.button, f"am_update_{alert_id}").click().run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+    assert state.statuses() == {alert_id: "Investigating"}
+    _widget(at.text_area, f"am_note_{alert_id}").set_value("Shared-store note.")
+    at = at.run()
+    at = _widget(at.button, f"am_add_note_{alert_id}").click().run()
+    assert not at.exception, [e.message for e in at.exception]
+    assert not at.error, [e.value for e in at.error]
+    assert state.notes(alert_id)[0]["text"] == "Shared-store note."
+    assert not (tmp_path / "statuses.json").exists()
+    assert not (tmp_path / "notes.json").exists()
+
+
+@requires_artefacts
 def test_local_shap_button_produces_a_real_explanation(sandbox, admin_token):
     at = _run("alert_management", admin_token)
     at = _widget(at.button, "am_shap_btn").click().run()

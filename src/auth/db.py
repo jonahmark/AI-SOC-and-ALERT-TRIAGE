@@ -12,6 +12,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from src.auth import settings as auth_settings
+from src.postgres import PostgresStore
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -167,61 +168,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_lower ON users (LOWER(usern
 _AUTH_SCHEMA_LOCK_ID = 0x4149534F43415554  # Fixed, process-independent auth DDL lock.
 
 
-class AuthStorageError(RuntimeError):
-    """Safe storage failure without connection credentials or SQL details."""
+class PostgresAuthStore(PostgresStore):
+    """Authentication tables in private PostgreSQL, bootstrapped on first use.
 
-
-class PostgresAuthStore:
-    """Private PostgreSQL storage; importing this module never imports psycopg.
-
-    query/query_one/execute accept only trusted internal auth SQL templates:
-    '?' denotes a parameter, never a literal or operator. Values must be passed
-    separately. Use transaction() for native PostgreSQL SQL and placeholders.
+    Connectivity, verified TLS, parameter binding and error sanitization come
+    from PostgresStore; this subclass only owns the auth schema.
     """
 
     def __init__(self, database_url: str):
-        try:
-            import certifi
-            import psycopg
-            from psycopg.conninfo import conninfo_to_dict, make_conninfo
-            from psycopg.rows import dict_row
-        except (ImportError, OSError):
-            raise AuthStorageError(
-                "Private PostgreSQL authentication dependencies are unavailable."
-            ) from None
-
-        self._psycopg = psycopg
-        self._dict_row = dict_row
-        # Stage validation so a misconfigured value yields actionable guidance
-        # without ever echoing the value itself (it contains credentials).
-        if not isinstance(database_url, str) or not database_url.startswith(
-                ("postgresql://", "postgres://")):
-            raise AuthStorageError(
-                "The database URL must start with postgresql:// - copy only the "
-                "URI itself, without psql commands, surrounding quotes, or labels.")
-        try:
-            options = conninfo_to_dict(database_url)
-        except (psycopg.Error, ValueError, TypeError):
-            raise AuthStorageError(
-                "The database URL could not be parsed - check the configured "
-                "value for stray spaces, quotes, or line breaks.") from None
-        # Require an explicit network host: libpq ignores TLS on sockets.
-        hosts = options.get("host", "").split(",")
-        if any(not host or host.startswith(("/", "@")) for host in hosts):
-            raise AuthStorageError(
-                "The database URL must include a network host name.")
-        options["sslmode"] = "verify-full"
-        options["sslrootcert"] = options.get("sslrootcert") or certifi.where()
-        # GSS encryption otherwise takes precedence over libpq's TLS mode.
-        options["gssencmode"] = "disable"
-        options.setdefault("connect_timeout", "30")
-        try:
-            self._conninfo = make_conninfo(**options)
-        except (psycopg.Error, ValueError, TypeError, OSError):
-            raise AuthStorageError(
-                "The database URL could not be parsed - check the configured "
-                "value for stray spaces, quotes, or line breaks.") from None
-
+        super().__init__(database_url)
         # CREATE IF NOT EXISTS alone is not safe against concurrent catalog
         # creation. Serialize all DDL across processes until this txn commits.
         with self.transaction() as conn:
@@ -230,43 +185,6 @@ class PostgresAuthStore:
             for statement in _POSTGRES_SCHEMA.split(";"):
                 if statement.strip():
                     conn.execute(statement)
-
-    @contextmanager
-    def transaction(self):
-        """Yield a native psycopg connection with dict rows and '%s' parameters.
-
-        Commit on success, roll back on failure, and always close the connection.
-        Driver/connection failures are sanitized, including commit/rollback errors.
-        """
-        try:
-            conn = self._psycopg.connect(
-                self._conninfo, row_factory=self._dict_row)
-            try:
-                yield conn
-                conn.commit()
-            except BaseException:
-                # Handle rollback ourselves: the driver's connection context
-                # manager can log raw diagnostics if rollback also fails.
-                conn.rollback()
-                raise
-            finally:
-                conn.close()
-        except (self._psycopg.Error, OSError, ValueError, TypeError):
-            raise AuthStorageError(
-                "Private PostgreSQL authentication storage operation failed."
-            ) from None
-
-    def query(self, sql: str, params: tuple = ()) -> list[dict]:
-        with self.transaction() as conn:
-            return conn.execute(sql.replace("?", "%s"), params).fetchall()
-
-    def query_one(self, sql: str, params: tuple = ()) -> dict | None:
-        with self.transaction() as conn:
-            return conn.execute(sql.replace("?", "%s"), params).fetchone()
-
-    def execute(self, sql: str, params: tuple = ()) -> int:
-        with self.transaction() as conn:
-            return conn.execute(sql.replace("?", "%s"), params).rowcount
 
 
 _STORES: dict[str, AuthStore | PostgresAuthStore] = {}

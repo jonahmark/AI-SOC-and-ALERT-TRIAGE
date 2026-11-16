@@ -31,7 +31,7 @@ if st.secrets.load_if_toml_exists():
 import config
 from dashboard import auth_ui, common, components as ui, nav
 from src.auth import service
-from src.auth.db import AuthStorageError
+from src.postgres import StorageError
 
 st.set_page_config(
     page_title="AI-SOC | Intelligent Security Operations",
@@ -63,7 +63,7 @@ def _prune_auth_store() -> None:
     block sign-in; a storage failure surfaces through the auth pages instead."""
     try:
         service.prune_expired()
-    except AuthStorageError:
+    except StorageError:
         pass
 
 
